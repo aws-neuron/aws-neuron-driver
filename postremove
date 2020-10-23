@@ -1,0 +1,3 @@
+rm -f "/etc/modules-load.d/neuron.conf"
+rmmod neuron
+rm -f /lib/udev/rules.d/neuron-udev.rules

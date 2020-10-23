@@ -1,0 +1,16 @@
+#
+# AWS Neuron Kernel Driver
+#
+
+menu "AWS Neuron Driver"
+
+config AWS_NEURON
+	tristate "AWS Neuron Driver"
+	default y
+	depends on PCI_MSI && 64BIT && !CPU_BIG_ENDIAN
+	---help---
+      Enable support for AWS Neuron devices.
+
+      If you don't have a AWS Neuron device, say N.
+
+endmenu
