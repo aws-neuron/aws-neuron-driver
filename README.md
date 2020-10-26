@@ -1,7 +1,7 @@
 # AWS Neuron Kernel Mode Driver
 # Overview
 
-This driver implements a lightweight IOCTL based interface to Neuron devices (Inferentia) managed by the Neuron SDK.
+This driver implements a lightweight IOCTL based interface to Neuron devices ([Inferentia](https://aws.amazon.com/machine-learning/inferentia/)) managed by the [Neuron SDK](https://github.com/aws/aws-neuron-sdk).
 The interface is used by ML applications and frameworks, such as PyTorch and TensorFlow.
 
 Neuron Device DMA engines are controlled by the driver.
