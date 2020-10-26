@@ -1,16 +1,10 @@
-# Linux kernel driver for AWS Machine Learning chips powered by Neuron SDK
-
+# AWS Neuron Kernel Mode Driver
 # Overview
 
-AWS Neuron SDK manages AWS Inferentia custom designed machine learning chips.
-With Neuron, users can develop, profile, and deploy high-performance inference predictions on top of Inferentia similar to EC2 Inf1 instances.
-
-Neuron provides hardware interfaces for loading compiled neural networks, executing inference requests, debugging, and performance monitoring.
-
-This driver implements a lightweight IOCTL based interface to hardware devices managed by Neuron.
+This driver implements a lightweight IOCTL based interface to Neuron devices (Inferentia) managed by the Neuron SDK.
 The interface is used by ML applications and frameworks, such as PyTorch and TensorFlow.
 
-AWS ML chip's DMA engines are controlled by the driver.
+Neuron Device DMA engines are controlled by the driver.
 The driver provides functions for copying data between an application running on the host and a Neuron Device.
 The driver also provides functions for an application to create rings of DMA descriptors and attach the rings to the DMA engines.
 These rings are used to feed instructions and data to Neuron-managed devices during the execution of ML graphs.
@@ -22,17 +16,17 @@ The driver provides mmap interface to an application to map a buffer in memory u
 An application polls the notifications to detect an inference completion.
 An application can read the notifications for debugging and profiling.
 
-To improve task execution latency an application can use DMA to send data to a Neuron-managed device or to receive data from it directly, i.e. the data does not need to pass through the kernel.
+To improve task execution latency an application can use DMA to send data to a Neuron Device or to receive data from it directly, i.e. the data does not need to pass through the kernel.
 The driver provides an interface to allocate coherent memory on behalf of an application.
-The memory allocated by the driver can be then used by the application for transferring the data in and out of a Neuron-managed Device.
+The memory allocated by the driver can be then used by the application for transferring the data in and out of a Neuron Device.
 
-Multiple Neuron-managed devices can be connected together via Neuron Pipe technology.
-These pipe links enable applications to transfer data from one Neuron-managed device to another without host CPU intervention.
-The driver provides an interface for discovering the neighboring Neuron-managed devices.
+Multiple Neuron Devices can be connected together via Neuron Pipe technology.
+These pipe links enable applications to transfer data from one Neuron Device to another without host CPU intervention.
+The driver provides an interface for discovering the neighboring Neuron Devices.
 
 Neuron Devices implement a communication channel (FWIO) that allows the driver and an application to send certain commands to the device.  The communication channel consists of a request and a response queue and a doorbell register.  The communication protocol is implemented by the driver and is used by both the driver and applications.  The driver places a request on the request queue and rings the doorbell.  The driver then polls the response queue.  The polling stops when the Neuron Device places a response on the response queue.  The communication channel is used for infrequent operations that are not latency sensitive such as:
 
-1. Reading Neuron-managed device registers - the driver avoid direct PCIe reads, instead, the driver issues a read command via FWIO.
+1. Reading Neuron Device registers - the driver avoid direct PCIe reads, instead, the driver issues a read command via FWIO.
 2. Writing runtime statistics to a Neuron Device.
 
 # Supported PCI Vendor ID/Device IDs
