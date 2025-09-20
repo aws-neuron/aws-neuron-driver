@@ -1,1 +1,7 @@
 echo 'KERNEL=="neuron*", MODE="0666"' > /lib/udev/rules.d/neuron-udev.rules
+udevadm control --reload-rules
+update-pciids || true
+NEURON_LOADED=$(lsmod | grep neuron)
+if [ "${kernelver}" = "$(uname -r)" ] && [ -n "${NEURON_LOADED}" ]; then
+    rmmod neuron
+fi

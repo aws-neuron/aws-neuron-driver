@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "../neuron_reg_access.h"
+
 /* tdma_rob_cfg:
  *        0:0 - en
  *        1:1 - force_inorder
@@ -52,8 +54,6 @@
  */
 static inline int tdma_init_engine(void __iomem *regs_base)
 {
-	u32 wob_value;
-	int ret;
 	if (regs_base == NULL)
 		return -EFAULT;
 
@@ -61,10 +61,7 @@ static inline int tdma_init_engine(void __iomem *regs_base)
 	reg_write32(regs_base + REG_TDMA_ROB_CFG_OFFSET, 1);
 
 	// WOB **must** be disabled on V1 because of a hw bug
-	ret = reg_read32(regs_base + REG_TDMA_WOB_CFG_OFFSET, &wob_value);
-	if (ret)
-		return ret;
-	reg_write32(regs_base + REG_TDMA_WOB_CFG_OFFSET, wob_value & ~REG_TDMA_WOB_CFG_EN_MASK);
+	reg_write32(regs_base + REG_TDMA_WOB_CFG_OFFSET, ~REG_TDMA_WOB_CFG_EN_MASK);
 
 	// enable event acceleration
 	reg_write32(regs_base + REG_TDMA_EVENT_ACCEL_OFFSET, 1);

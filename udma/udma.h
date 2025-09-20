@@ -20,9 +20,11 @@
  */
 #define UDMA_NUM_QUEUES_MAX 0xff
 
+#define UDMA_QUEUE_ADDR_BYTE_ALIGNMENT 256 // start and end addr for ring must be 256 byte aligned for prefetching
+
 /* DMA queue size range */
 #define UDMA_MIN_Q_SIZE 32
-#define UDMA_MAX_Q_SIZE (1 << 24)
+#define UDMA_MAX_Q_SIZE ((1 << 24) - 16) // udma start and end addr must be 256 byte aligned. Since a desc is 16 bytes, Max queue size in descs is (2^24 - (256 / 16))
 
 /* V1 hardware is DMA rev 4, other revisions are not supported */
 #define UDMA_REV_ID_4 4
@@ -62,12 +64,15 @@ union udma_desc {
 #define M2S_DESC_RING_ID_SHIFT 24
 #define M2S_DESC_RING_ID_MASK (0x3 << M2S_DESC_RING_ID_SHIFT) /* Ring ID bits in m2s */
 #define M2S_DESC_LEN_SHIFT 0
-#define M2S_DESC_LEN_MASK (0xfffff << M2S_DESC_LEN_SHIFT) /* Data length */
+#define M2S_DESC_LEN_MASK (0xffff << M2S_DESC_LEN_SHIFT) /* Data length */
 
 #define S2M_DESC_INT_EN BIT(28) /* Enable Interrupt on completion */
 #define S2M_DESC_RING_ID_SHIFT 24
 #define S2M_DESC_RING_ID_MASK (0x3 << S2M_DESC_RING_ID_SHIFT) /* Ring ID bits in s2m */
 #define S2M_DESC_RING_SHIFT UDMA_S2M_Q_RDRBP_LOW_ADDR_SHIFT
+
+#define IS_POWER_OF_TWO(base) (((base) & ((base) - 1)) == 0) /* helper to check for powers of 2 */
+#define HAS_ALIGNMENT(base, alignment) (((base) & ((alignment) - 1)) == 0) /* helper to check alignments */
 
 /** UDMA completion descriptor */
 union udma_cdesc {
@@ -88,17 +93,17 @@ union udma_cdesc {
 
 /** UDMA queue type */
 enum udma_type {
-    UDMA_TX,
-    UDMA_RX
+	UDMA_TX,
+	UDMA_RX
 };
 
 /** UDMA state */
 enum udma_state {
-    UDMA_DISABLE = 0,
-    UDMA_IDLE,
-    UDMA_NORMAL,
-    UDMA_ABORT,
-    UDMA_RESET
+	UDMA_DISABLE = 0,
+	UDMA_IDLE,
+	UDMA_NORMAL,
+	UDMA_ABORT,
+	UDMA_RESET
 };
 
 extern const char *const udma_states_name[];
@@ -113,6 +118,7 @@ struct udma_q_params {
 	dma_addr_t cdesc_phy_base; // completion descriptors ring physical base address
 	u8 adapter_rev_id; // PCI adapter revision ID
 	enum udma_type type; // m2s (TX) or s2m (RX)
+	u32 eng_id;
 };
 
 #define UDMA_INSTANCE_NAME_LEN 25
@@ -125,6 +131,7 @@ struct udma_params {
 	u8 num_of_queues; // number of queues used by the UDMA
 	u32 flags;
 	const char *name; /**< caller should not free name*/
+	bool reserve_max_read_axi_id; // a V2 configuration workaround
 };
 
 /* Fordward declaration */
@@ -156,6 +163,7 @@ struct __attribute__((__aligned__(64))) udma_q {
 	enum udma_queue_status status;
 	struct udma *udma; // pointer to parent UDMA
 	u32 qid; // the index number of the queue
+	u32 eng_id; // engine_id that this queue belongs to
 	enum udma_type type; /* Tx or Rx */
 	u8 adapter_rev_id; // PCI adapter revision ID
 	u32 cfg; // default value of CFG CSR. Cache here to avoid reads during queue enable/disable
@@ -181,16 +189,14 @@ struct udma {
 	struct udma_q udma_q_s2m[DMA_MAX_Q_MAX]; // Array of UDMA Qs pointers
 	unsigned int rev_id; // UDMA revision ID
 	u32 cdesc_size;
+	bool reserve_max_read_axi_id; // a V2 configuration workaround
 };
 
-/**
- * udma_revision_get() - Get the UDMA revision
- *
- * @regs_base: pointer to the UDMA registers
- *
- * Return: revision id of the hardware
- */
-unsigned int udma_revision_get(void __iomem *regs_base);
+enum {
+	UDMA_M2M_BARRIER_NONE = 0,
+	UDMA_M2M_BARRIER_DMB = 1,
+	UDMA_M2M_BARRIER_WRITE_BARRIER = 2
+};
 
 /**
  * udma_init() - Initialize udma engine.
@@ -220,20 +226,13 @@ int udma_init(struct udma *udma, struct udma_params *udma_params);
 int udma_q_init(struct udma *udma, u32 qid, struct udma_q_params *q_params);
 
 /**
- * udma_q_reset() - Reset a udma queue
- *
- * Prior to calling this function make sure:
- * 1. Queue interrupts are masked
- * 2. No additional descriptors are written to the descriptor ring of the queue
- * 3. No completed descriptors are being fetched
- *
- * The queue can be initialized again using 'udma_q_init'
+ * udma_q_pause() - Pauses a udma queue
  *
  * @udma_q:	udma queue data structure
  *
  * Return: 0 on success, a negative error code otherwise.
  */
-int udma_q_reset(struct udma_q *udma_q);
+int udma_q_pause(struct udma_q *udma_q);
 
 /**
  * udma_q_handle_get() -  Return a pointer to a queue date structure.
@@ -259,6 +258,30 @@ void udma_iofic_m2s_error_ints_unmask(struct udma *udma);
  * @udma: udma data structure
  */
 void udma_iofic_s2m_error_ints_unmask(struct udma *udma);
+
+/**
+ * udma_iofic_error_ints_unmask_one() - Unmask error interrupts for the given iofic_ctrl.
+ *
+ * @iofic_ctrl: iofic data structure
+ * @mask: mask of interrupts to unmask
+ */
+void udma_iofic_error_ints_unmask_one(struct iofic_grp_ctrl *iofic_ctrl, uint32_t mask);
+
+/**
+ * udma_m2m_set_axi_error_abort() - Program axi error detection.
+ * Needed to trigger udma abort for v2: https://tiny.amazon.com/tbm9ad1i
+ *
+ * @udma: udma data structure
+ */
+void udma_m2m_set_axi_error_abort(struct udma *udma);
+
+/**
+ * udma_m2m_mask_ring_id_error() - Mask out error detection on invalid ring ids
+ *
+ * @udma: udma data structure
+ * @intc_base: interrupt controller base
+ */
+void udma_m2m_mask_ring_id_error(struct udma *udma, void __iomem *intc_base);
 
 /**
  * udma_state_set() - Change the UDMA's state
@@ -288,6 +311,11 @@ enum udma_state udma_state_get(struct udma *udma, enum udma_type type);
  */
 static inline u32 udma_available_get(struct udma_q *udma_q)
 {
+	// This function will only run on dma queues that use the
+	// wraparound feature (h2t only at the moment).
+	// Due to the wraparound logic using bitwise and as mod,
+	// we need to check size is power of 2.
+	BUG_ON(IS_POWER_OF_TWO(udma_q->size) == false);
 	u32 tmp = udma_q->next_cdesc_idx -
 		  (udma_q->next_desc_idx + UDMA_MAX_NUM_CDESC_PER_CACHE_LINE);
 	tmp &= udma_q->size_mask;
@@ -308,15 +336,26 @@ static inline union udma_desc *udma_desc_get(struct udma_q *udma_q)
 	u32 next_desc_idx;
 
 	BUG_ON(udma_q == NULL);
-	if (!udma_q->is_allocatable) {
+	/* when setting up the queue caller might pass NULL for
+	   the queue base address.  That means the caller is responsible for
+	   attaching the ring and managing it somehow.  Should not be calling
+	   this function in that case
+	*/
+	if (udma_q->desc_base_ptr == NULL)
 		return NULL;
-	}
+	if (!udma_q->is_allocatable)
+		return NULL;
 
 	next_desc_idx = udma_q->next_desc_idx;
 	desc = udma_q->desc_base_ptr + next_desc_idx;
 
 	next_desc_idx++;
 
+	// This function will only run on dma queues that use the
+	// wraparound feature (h2t only at the moment).
+	// Due to the wraparound logic using bitwise and as mod,
+	// we need to check size is power of 2.
+	BUG_ON(IS_POWER_OF_TWO(udma_q->size) == false);
 	/* if reached end of queue, wrap around */
 	udma_q->next_desc_idx = next_desc_idx & udma_q->size_mask;
 
@@ -365,6 +404,11 @@ void udma_desc_action_add(struct udma_q *udma_q, u32 num);
 static inline void udma_cdesc_ack(struct udma_q *udma_q, u32 num)
 {
 	BUG_ON(udma_q == NULL);
+	// This function will only run on dma queues that use the
+	// wraparound feature (h2t only at the moment).
+	// Due to the wraparound logic using bitwise and as mod,
+	// we need to check size is power of 2.
+	BUG_ON(IS_POWER_OF_TWO(udma_q->size) == false);
 
 	u32 cdesc_idx = udma_q->next_cdesc_idx;
 	u32 next_cdesc_idx = (cdesc_idx + num) & udma_q->size_mask;
@@ -396,19 +440,20 @@ struct udma_ring_ptr {
  * @num_queues: Number of queues
  * @eng_name: Human readable name(for debugging)
  * @disable_phase_bit: If true disables checking phase bit
- *
+ * @reserve_max_read_axi_id: a V2 configuration workaround
  * Return: 0 if initialization is successful, a negative error code otherwise.
  */
 int udma_m2m_init_engine(struct udma *udma, void __iomem *regs_base, int num_queues, char *eng_name,
-			 int disable_phase_bit);
+			 int disable_phase_bit, int allowed_desc_per_pkt, bool reserve_max_read_axi_id);
 
 /**
  * udma_m2m_init_queue() - Initialize a queue in the M2M engine.
  *
  * @udma: UDMA structure.
  * @qid: Queue index.
- * @m2s_ring_size: Number of descriptors in the m2s queue(must be power of 2).
- * @s2m_ring_size: Number of descriptors in the s2m queue(must be power of 2).
+ * @eng_id: Engine index
+ * @m2s_ring_size: Number of descriptors in the m2s queue.
+ * @s2m_ring_size: Number of descriptors in the s2m queue.
  * @desc_allocatable: If false it means, descriptors cant be allocated from this queue.
  * @m2s_ring: Address/pointer to m2s queue.
  * @s2m_ring: Address/pointer to s2m queue.
@@ -416,7 +461,7 @@ int udma_m2m_init_engine(struct udma *udma, void __iomem *regs_base, int num_que
  *
  * Return: 0 if initialization is successful, a negative error code otherwise.
  */
-int udma_m2m_init_queue(struct udma *udma, int qid, u32 m2s_ring_size, u32 s2m_ring_size,
+int udma_m2m_init_queue(struct udma *udma, int qid, u32 eng_id, u32 m2s_ring_size, u32 s2m_ring_size,
 			bool desc_allocatable, struct udma_ring_ptr *m2s_ring,
 			struct udma_ring_ptr *s2m_ring, struct udma_ring_ptr *s2m_compl_ring);
 
@@ -428,23 +473,26 @@ int udma_m2m_init_queue(struct udma *udma, int qid, u32 m2s_ring_size, u32 s2m_r
  * @s_addr: Source physical address.
  * @d_addr: Destination physical address.
  * @size: - Size of the transfer(max 64K).
- * @set_dmb: Set memory barrier bit. This would make sure all previous transfer are done before starting this.
+ * @barrier_type:
+ *     0. no barrier is used
+ *     1. set memory barrier bit (DMB): this would make sure all previous transfers are done before starting this.
+ *     2. use write barrier: if set dmb is set for trn chip, this will use the write barrier
  * @param en_int[in] - Enable interrupt bit.
  *
  * Return: 0 if successful, a negative error code otherwise.
  */
 int udma_m2m_copy_prepare_one(struct udma *udma, u32 qid, dma_addr_t s_addr, dma_addr_t d_addr,
-			      u32 size, bool set_dmb, bool en_int);
+			      u32 size, int barrier_type, bool en_int);
 
 /**
- * udma_m2m_copy_start() - Start DMA transfer
+ * udma_m2m_copy_start() - Start DMA transfer or prefetch s2m descriptors
  *
  * udma_m2m_copy_prepare_one() should be used create descriptor and then use this function
  * to start the transfer.
  *
  * @udma: DMA structure.
  * @qid: Queue index.
- * @src_count: Number of source descriptors.
+ * @src_count: Number of source descriptors. Can be 0 when called to prefetch s2m ahead of time
  * @dst_count: Number of destination descriptors.
  *
  * Return: 0 if successful, a negative error code otherwise.

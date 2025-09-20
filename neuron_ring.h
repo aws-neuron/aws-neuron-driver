@@ -7,18 +7,41 @@
 #define NEURON_RING_H
 
 #include "udma/udma.h"
-#include "v1/tdma.h"
-#include "v1/address_map.h"
 
-#define DMA_ENG_IDX_H2T 2
 #define DMA_H2T_DESC_COUNT 4096
-#define MAX_DMA_RINGS 16
+#define NUM_DMA_ENG_PER_DEVICE 132 // for v2 2 nc with each 16,
 
-#define NUM_DMA_ENG_PER_DEVICE (V1_NC_PER_DEVICE * V1_DMA_ENG_PER_NC)
+#define NDMA_QUEUE_DUMMY_RING_DESC_COUNT 64
+#define NDMA_QUEUE_DUMMY_RING_SIZE (NDMA_QUEUE_DUMMY_RING_DESC_COUNT * sizeof(union udma_desc))
+
+extern int nc_per_dev_param;
 
 struct neuron_device;
 struct neuron_dma_eng_state;
 struct neuron_dma_queue_state;
+
+/*
+ * dma context for both sync and async DMA operations
+ *    the context keeps transient and 
+ *
+ * this needs to be encapsulated in the DMA module
+ */
+struct ndma_h2t_dma_context {
+	bool              inuse;              //
+	struct ndma_eng  *eng;                //
+	struct ndma_ring *ring;               //
+	dma_addr_t        src;                // original src
+	dma_addr_t        dst;                // original dst
+	u64               size;               // original size 
+	bool              smove;              //
+	bool              dmove;              //
+	u64               start_time;         // start time for this transfer
+	u64               offset;             // initial offset for this transfer
+	u64               remaining;          // initial remaining for this transfer
+	u64               outstanding;        // outstanding data for this transfer - used to compute wait time. (vs pending)
+	int               pending_transfers;  // pending transfers for this context.  Used to update ring ptrs
+	void             *completion_ptr;     // completion buffer pointer (host memory buffer we poll on for completions)
+};
 
 struct ndma_ring {
 	u32 qid;
@@ -27,9 +50,12 @@ struct ndma_ring {
 	struct udma_ring_ptr tx;
 	struct udma_ring_ptr rx;
 	struct udma_ring_ptr rxc;
+	struct udma_ring_ptr h2t_completion;
 	struct mem_chunk *tx_mc;
 	struct mem_chunk *rx_mc;
 	struct mem_chunk *rxc_mc;
+	struct mem_chunk *h2t_completion_mc;
+	struct ndma_h2t_dma_context h2t_dma_ctx[NEURON_DMA_H2T_CTX_HANDLE_CNT];
 	u32 dram_channel;
 };
 
@@ -37,7 +63,7 @@ struct ndma_queue {
 	struct ndma_ring ring_info;
 	u32 eng_id;
 	u32 qid;
-	bool in_use;
+	pid_t owner; // process which initialized this queue.
 };
 
 struct ndma_eng {
@@ -51,6 +77,22 @@ struct ndma_eng {
 };
 
 /**
+ * ndmar_acquire_engine() - acquire the DMA engine
+ * 
+ * @param nd: neuron device
+ * @param eng_id: DMA engine ID
+ * @return struct ndma_eng*: the DMA engine to be acquired
+ */
+struct ndma_eng *ndmar_acquire_engine(struct neuron_device *nd, u32 eng_id);
+
+/**
+ * ndmar_release_engine() - release the DMA engine
+ * 
+ * @param eng: the DMA engine to be released
+ */
+void ndmar_release_engine(struct ndma_eng *eng);
+
+/**
  * ndmar_init() - Initialize DMA structures for given neuron device
  *
  * @nd: Neuron device to initialize
@@ -58,6 +100,16 @@ struct ndma_eng {
  * Return: 0 if initialization succeeds, a negative error code otherwise.
  */
 int ndmar_init(struct neuron_device *nd);
+
+/**
+ * ndmar_init_ncs() - Initialize DMA structures for given neuron core
+ *
+ * @nd:     Neuron device to initialize
+ * @nc_map: Neuron core to initialize (NEURON_NC_MAP_DEVICE for entire device)
+ *
+ * Return: 0 if initialization succeeds, a negative error code otherwise.
+ */
+int ndmar_init_ncs(struct neuron_device *nd, uint32_t nc_map);
 
 /**
  * ndmar_close() - Close and cleanup DMA for given neuron device
@@ -69,6 +121,16 @@ int ndmar_init(struct neuron_device *nd);
 void ndmar_close(struct neuron_device *nd);
 
 /**
+ * ndmar_close_ncs() - Close and cleanup DMA for given neuron core
+ *
+ * @nd:     Neuron device to cleanup
+ * @nc_map: Neuron core to cleanup (NEURON_NC_MAP_DEVICE for entire device)
+ *
+ * Return: 0 if cleanup succeeds, a negative error code otherwise.
+ */
+void ndmar_close_ncs(struct neuron_device *nd, uint32_t nc_map);
+
+/**
  * ndmar_eng_init() - Initialize a DMA engine
  *
  * @nd: Neuron device which contains the DMA engine
@@ -77,6 +139,13 @@ void ndmar_close(struct neuron_device *nd);
  * Return: 0 if initialization succeeds, a negative error code otherwise.
  */
 int ndmar_eng_init(struct neuron_device *nd, int eng_id);
+
+/**
+ * ndmar_preinit() - Initialize all DMA engines for neuron device
+ *
+ * @param nd: Neuron device which contains the DMA engine
+ */
+void ndmar_preinit(struct neuron_device *nd);
 
 /**
  * ndmar_eng_set_state() - Change DMA engine's state
@@ -101,12 +170,13 @@ int ndmar_eng_set_state(struct neuron_device *nd, int eng_id, u32 state);
  * @rx_mc: Memory chunk backing RX queue
  * @rxc_mc: Memory chunk backing RX completion queue
  * @port: AXI port.
+ * @allocatable: whether new descriptors can be added post queue init
  *
  * Return: 0 if queue init succeeds, a negative error code otherwise.
  */
 int ndmar_queue_init(struct neuron_device *nd, u32 eng_id, u32 qid, u32 tx_desc_count,
 		     u32 rx_desc_count, struct mem_chunk *tx_mc, struct mem_chunk *rx_mc,
-		     struct mem_chunk *rxc_mc, u32 port);
+		     struct mem_chunk *rxc_mc, u32 port, bool allocatable);
 
 /**
  * ndmar_queue_release() - Release a DMA queue.
@@ -118,6 +188,18 @@ int ndmar_queue_init(struct neuron_device *nd, u32 eng_id, u32 qid, u32 tx_desc_
  * Return: 0 if queue release succeeds, a negative error code otherwise.
  */
 int ndmar_queue_release(struct neuron_device *nd, u32 eng_id, u32 qid);
+
+/**
+ * ndmar_handle_process_exit() - Stops all the queues used by the given process.
+ *
+ * This function should be called when a process exits(before the MCs are freed),
+ * so that the DMA engines used can be reset and any ongoing DMA transaction can be
+ * stopped.
+ *
+ * @nd: Neuron device
+ * @pid: Process id.
+ */
+void ndmar_handle_process_exit(struct neuron_device *nd, pid_t pid);
 
 /**
  * ndmar_queue_copy_start() - Start DMA transfer.
@@ -148,22 +230,26 @@ int ndmar_queue_copy_start(struct neuron_device *nd, u32 eng_id, u32 qid, u32 tx
  */
 int ndmar_ack_completed(struct neuron_device *nd, u32 eng_id, u32 qid, u32 count);
 
+
+
 /**
- * ndmar_queue_get_descriptor_mc() - Get backing memory chunk info.
+ * ndmar_queue_get_descriptor_info() - Get backing physical address info, len, mcs
  *
  * @nd: Neuron device which contains the DMA engine
  * @nd: DMA engine index which contains the DMA queue
  * @qid: DMA queue index
- * @tx: Buffer to store TX mc
- * @rx: Buffer to store RX mc
+ * @tx_mc: Buffer to store TX mc
+ * @rx_mc: Buffer to store RX mc
+ * @tx_pa: Buffer to store TX device side physical address
+ * @rx_pa: Buffer to store RX device side physical address
  * @tx_size: Buffer to store tx descriptor count
  * @rx_size: Buffer to store rx descriptor count
  *
  * Return: 0 on success, a negative error code otherwise.
  */
-int ndmar_queue_get_descriptor_mc(struct neuron_device *nd, u8 eng_id, u8 qid,
-				  struct mem_chunk **tx, struct mem_chunk **rx, u32 *tx_size,
-				  u32 *rx_size);
+int ndmar_queue_get_descriptor_info(struct neuron_device *nd, u8 eng_id, u8 qid,
+				  struct mem_chunk **tx_mc, struct mem_chunk **rx_mc, u64 *tx_pa, u64 *rx_pa, 
+				  u32 *tx_size, u32 *rx_size);
 
 /**
  * ndmar_eng_get_state() - Get DMA engine's current state.
@@ -189,5 +275,16 @@ int ndmar_eng_get_state(struct neuron_device *nd, int eng_id, struct neuron_dma_
  */
 int ndmar_queue_get_state(struct neuron_device *nd, int eng_id, int qid,
 			  struct neuron_dma_queue_state *tx, struct neuron_dma_queue_state *rx);
+
+/** ndmar_h2t_ring_init() - initialize a DMA ring 
+ * 
+ * @eng_id: DMA engine index
+ * @qid: DMA queue index
+ * 
+ * Return: 0 on success, a negative error code otherwise
+ */
+int ndmar_h2t_ring_init(struct ndma_eng *eng, int qid);
+
+u32 ndmar_ring_get_desc_count(u32 v);
 
 #endif

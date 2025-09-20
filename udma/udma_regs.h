@@ -12,10 +12,19 @@
 #include <linux/types.h>
 
 struct udma_axi_m2s {
-	u32 reserved0[9];
-	/* [0x24] AXI outstanding  configuration */
+	u32 comp_wr_cfg_1;
+	u32 comp_wr_cfg_2;
+	u32 data_rd_cfg_1;
+	u32 data_rd_cfg_2;
+	u32 desc_rd_cfg_1;
+	u32 desc_rd_cfg_2;
+	/* [0x18] Data read master configuration */
+	u32 data_rd_cfg;
+	u32 desc_rd_cfg_3;
+	u32 desc_wr_cfg_1;
+	/* [0x24] AXI outstanding configuration */
 	u32 ostand_cfg;
-	u32 reserved1[54];
+	u32 reserved2[54];
 };
 
 struct udma_m2s {
@@ -29,10 +38,14 @@ struct udma_m2s {
 	u32 state;
 	/* [0x4] CPU request to change DMA state */
 	u32 change_state;
-	u32 reserved0[19];
+	u32 reserved0;
+	u32 err_log_mask;
+	u32 reserved1[17];
 	/* [0x54] M2S packet length configuration */
 	u32 cfg_len;
-	u32 reserved1[42];
+	/* [0x58] Stream interface configuration */
+	u32 stream_cfg;
+	u32 reserved2[41];
 };
 
 struct udma_m2s_rd {
@@ -140,14 +153,41 @@ struct udma_m2s_regs_v4 {
  */
 #define UDMA_M2S_CFG_LEN_ENCODE_64K (1 << 24)
 
+/**** stream_cfg register ****/
+/*
+ * Disables the stream interface operation.
+ * Changing to 1 stops at the end of packet transmission.
+ */
+#define UDMA_M2S_STREAM_CFG_DISABLE  (1 << 0)
+/*
+ * Configuration of the stream FIFO read control.
+ * 0 - Cut through
+ * 1 - Threshold based
+ */
+#define UDMA_M2S_STREAM_CFG_RD_MODE  (1 << 1)
+/* Minimum number of beats to start packet transmission. */
+#define UDMA_M2S_STREAM_CFG_RD_TH_MASK 0x0007FF00
+#define UDMA_M2S_STREAM_CFG_RD_TH_SHIFT 8
+
+#define UDMA_M2S_RD_DESC_PREF_CFG_2_PERF_FORCE_RR_SHIFT 16
 /* Maximum number of descriptors per packet */
-#define UDMA_M2S_RD_DESC_PREF_CFG_2_MAX_DESC_PER_PKT_MASK 0x00000FFF
 #define UDMA_M2S_RD_DESC_PREF_CFG_2_MAX_DESC_PER_PKT_SHIFT 0
+
+/* Maximum descriptor burst size axi_m2s/s2m->desc_rd_cfg_3
+*/
+#define UDMA_AXI_M2S_DESC_RD_CFG_3_MAX_AXI_BEATS_SHIFT 0  // confusingly named, actually number of descs
+#define UDMA_AXI_M2S_DESC_RD_CFG_3_ALWAYS_BREAK_ON_MAX_BOUNDARY_SHIFT 16
+#define UDMA_AXI_S2M_DESC_RD_CFG_3_MAX_AXI_BEATS_SHIFT 0  // confusingly named, actually number of descs
+#define UDMA_AXI_S2M_DESC_RD_CFG_3_ALWAYS_BREAK_ON_MAX_BOUNDARY_SHIFT 16
 
 /* Minimum descriptor burst size when prefetch FIFO level is above the descriptor prefetch threshold
  */
 #define UDMA_M2S_RD_DESC_PREF_CFG_3_MIN_BURST_ABOVE_THR_MASK 0x000000F0
 #define UDMA_M2S_RD_DESC_PREF_CFG_3_MIN_BURST_ABOVE_THR_SHIFT 4
+#define UDMA_S2M_RD_DESC_PREF_CFG_3_MIN_BURST_ABOVE_THR_SHIFT 4
+
+#define UDMA_M2S_RD_DESC_PREF_CFG_3_MIN_BURST_BELOW_THR_SHIFT 0
+#define UDMA_S2M_RD_DESC_PREF_CFG_3_MIN_BURST_BELOW_THR_SHIFT 0
 
 /* Descriptor fetch threshold.
  * Used as a threshold to determine the allowed minimum descriptor burst size.
@@ -155,12 +195,19 @@ struct udma_m2s_regs_v4 {
  */
 #define UDMA_M2S_RD_DESC_PREF_CFG_3_PREF_THR_MASK 0x0000FF00
 #define UDMA_M2S_RD_DESC_PREF_CFG_3_PREF_THR_SHIFT 8
+#define UDMA_S2M_RD_DESC_PREF_CFG_3_PREF_THR_SHIFT 8
 
 /* Maximum number of data beats in the data read FIFO.
  * Defined based on data FIFO size. (default FIFO size 16KB - 512 beats) (V4)
  */
 #define UDMA_M2S_RD_DATA_CFG_DATA_FIFO_DEPTH_MASK 0x00000FFF
 #define UDMA_M2S_RD_DATA_CFG_DATA_FIFO_DEPTH_SHIFT 0
+
+/** Maximum number of packets in the data read FIFO.
+ *  Defined based on header FIFO size.
+ */
+#define UDMA_M2S_RD_DATA_CFG_MAX_PKT_LIMIT_SHIFT 16
+#define UDMA_M2S_RD_DATA_CFG_MAX_PKT_LIMIT_RESET_VALUE 0x100
 
 /* Enable prefetch operation of this queue.*/
 #define UDMA_M2S_Q_CFG_EN_PREF (1 << 16)
@@ -235,12 +282,22 @@ struct udma_m2s_regs_v4 {
 #define UDMA_M2S_Q_SW_CTRL_RST_Q (1 << 8)
 
 struct udma_axi_s2m {
-	u32 reserved0[9];
+	u32 data_wr_cfg_1;
+	u32 data_wr_cfg_2;
+	u32 desc_rd_cfg_4;
+	u32 desc_rd_cfg_5;
+	u32 comp_wr_cfg_1;
+	u32 comp_wr_cfg_2;
+	u32 data_wr_cfg;
+	u32 desc_rd_cfg_3;
+	u32 desc_wr_cfg_1;	
 	/* [0x24] AXI outstanding read configuration */
 	u32 ostand_cfg_rd;
 	/* [0x28] AXI outstanding write configuration */
 	u32 ostand_cfg_wr;
-	u32 reserved1[53];
+	/* [0x2c] AXI outstanding write configuration 2 */
+	u32 ostand_cfg_wr_2;
+	u32 reserved1[52];
 };
 
 struct udma_s2m {
@@ -254,10 +311,12 @@ struct udma_s2m {
 	u32 state;
 	/* [0x4] CPU request to change DMA state */
 	u32 change_state;
-	u32 reserved0[18];
+	u32 reserved0;
+	u32 err_log_mask;
+	u32 reserved1[16];
 	/* [0x50] Stream interface configuration */
 	u32 stream_cfg;
-	u32 reserved1[43];
+	u32 reserved2[43];
 };
 
 struct udma_s2m_rd {
@@ -334,14 +393,21 @@ struct udma_s2m_regs_v4 {
 /* Maximum number of outstanding descriptor reads to the AXI.*/
 #define UDMA_AXI_S2M_OSTAND_CFG_RD_MAX_DESC_RD_OSTAND_MASK 0x000000FF
 #define UDMA_AXI_S2M_OSTAND_CFG_RD_MAX_DESC_RD_OSTAND_SHIFT 0
+/* Maximum number of outstanding stream acknowledges. */
+#define UDMA_AXI_S2M_OSTAND_CFG_RD_MAX_STREAM_ACK_SHIFT 16
 
 /* Maximum number of outstanding data writes to the AXI. */
-#define UDMA_AXI_S2M_OSTAND_CFG_WR_MAX_DATA_WR_OSTAND_MASK 0x000000FF
 #define UDMA_AXI_S2M_OSTAND_CFG_WR_MAX_DATA_WR_OSTAND_SHIFT 0
-
 /* Maximum number of outstanding descriptor writes to the AXI. */
-#define UDMA_AXI_S2M_OSTAND_CFG_WR_MAX_COMP_REQ_MASK 0x00FF0000
+#define UDMA_AXI_S2M_OSTAND_CFG_WR_MAX_DATA_BEATS_WR_SHIFT 8
+/* Maximum number of outstanding data beats for data write to AXI. (AXI beats). */
 #define UDMA_AXI_S2M_OSTAND_CFG_WR_MAX_COMP_REQ_SHIFT 16
+/* Maximum number of outstanding data beats for descriptor write to AXI. (AXI beats). */
+#define UDMA_AXI_S2M_OSTAND_CFG_WR_MAX_COMP_DATA_WR_SHIFT 24
+
+/* Maximum number of outstanding data writes to the AXI */
+#define UDMA_AXI_S2M_OSTAND_CFG_WR_2_MAX_DATA_WR_OSTAND_MASK 0x000003FF
+#define UDMA_AXI_S2M_OSTAND_CFG_WR_2_MAX_DATA_WR_OSTAND_SHIFT 0
 
 /* Disables the stream interface operation.
  * Changing to 1 stops at the end of packet reception.
@@ -356,8 +422,11 @@ struct udma_s2m_regs_v4 {
 /* Stop descriptor prefetch when the stream is disabled and the S2M is idle. */
 #define UDMA_S2M_STREAM_CFG_STOP_PREFETCH (1 << 8)
 
+/* Enable promotion of the current queue in progress in the completion write scheduler. */
+#define UDMA_S2M_COMP_CFG_1C_Q_PROMOTION_SHIFT 12
+
 /* Completion descriptor size(words). */
-#define UDMA_S2M_COMP_CFG_1C_DESC_SIZE_MASK 0x0000000F
+#define UDMA_S2M_COMP_CFG_1C_DESC_SIZE_SHIFT 0x0
 
 /* Reset the queue */
 #define UDMA_S2M_Q_SW_CTRL_RST_Q (1 << 8)
@@ -376,6 +445,9 @@ struct udma_s2m_regs_v4 {
 /* Maximum number of outstanding descriptor writes to the AXI (AXI transactions) - up to 128 */
 #define UDMA_AXI_M2S_OSTAND_CFG_MAX_COMP_REQ_MASK 0x00FF0000
 #define UDMA_AXI_M2S_OSTAND_CFG_MAX_COMP_REQ_SHIFT 16
+
+/* Maximum number of outstanding data beats for descriptor write to AXI (AXI beats) - up to 32 */
+#define UDMA_AXI_M2S_OSTAND_CFG_MAX_COMP_DATA_WR_SHIFT 24
 
 /* Completion control */
 #define UDMA_M2S_STATE_COMP_CTRL_MASK 0x00000003
@@ -396,6 +468,20 @@ struct udma_s2m_regs_v4 {
 #define UDMA_M2S_CHANGE_STATE_DIS (1 << 1)
 /* Stop all internal engines */
 #define UDMA_M2S_CHANGE_STATE_ABORT (1 << 2)
+
+/* Ring ID m2s error */
+#define UDMA_M2S_ERR_LOG_MASK_PREF_RING_ID (1 << 17)
+/* Ring ID s2m error */
+#define UDMA_S2M_ERR_LOG_MASK_PREF_RING_ID (1 << 11)
+
+/* Interrupt controller level ring id m2s error */
+#define INT_CONTROL_GRP_UDMA_M2S_PREF_RING_ID (1 << 11)
+/* Interrupt controller level ring id s2m error */
+#define INT_CONTROL_GRP_UDMA_S2M_PREF_RING_ID (1 << 2)
+
+/* Disables the stream interface operation. */
+#define UDMA_S2M_DMA_RING_DISABLE (1 << 0)
+
 
 struct iofic_grp_ctrl {
 	/* [0x0] Interrupt Cause Register */
@@ -424,13 +510,13 @@ struct iofic_grp_ctrl {
 	u32 reserved7[3];
 };
 
-struct iofic_regs {
-	struct iofic_grp_ctrl ctrl[0];
+union iofic_regs {
+	struct iofic_grp_ctrl ctrl[16];
 	u32 reserved0[0x400 >> 2];
 };
 
 struct udma_iofic_regs {
-	struct iofic_regs main_iofic;
+	union iofic_regs main_iofic;
 	u32 reserved0[(0x1c00) >> 2];
 	struct iofic_grp_ctrl secondary_iofic_ctrl[2];
 };
@@ -441,6 +527,57 @@ struct udma_gen_axi {
 	u32 reserved0[63];
 };
 
+struct udma_gen_axi_error_detection_table {
+	/* [0x0] Addr to table is {axi_parity_error,axi_timeout_error,axi_response_error} */
+	uint32_t addr0;
+	/* [0x4] */
+	uint32_t addr1;
+	/* [0x8] */
+	uint32_t addr2;
+	/* [0xc] */
+	uint32_t addr3;
+	/* [0x10] */
+	uint32_t addr4;
+	/* [0x14] */
+	uint32_t addr5;
+	/* [0x18] */
+	uint32_t addr6;
+	/* [0x1c] */
+	uint32_t addr7;
+	/* [0x20] */
+	uint32_t addr8;
+	/* [0x24] */
+	uint32_t addr9;
+	/* [0x28] */
+	uint32_t addr10;
+	/* [0x2c] */
+	uint32_t addr11;
+	/* [0x30] */
+	uint32_t addr12;
+	/* [0x34] */
+	uint32_t addr13;
+	/* [0x38] */
+	uint32_t addr14;
+	/* [0x3c] */
+	uint32_t addr15;
+};
+
+struct udma_gen_axi_error_control {
+	/* [0x0] */
+	uint32_t table_addr;
+	/* [0x4] */
+	uint32_t table_data;
+};
+
+struct udma_gen_axi_queue {
+	/* [0x0] this register can change axi queue state ACTIVE/NON_ACTIVE */
+	uint32_t state_request;
+	/* [0x4] This register is read on clear on read */
+	uint32_t error_status;
+	/* [0x8] */
+	uint32_t cfg;
+};
+
 struct udma_gen_spare_reg {
 	u32 zeroes0;
 	u32 zeroes1;
@@ -449,11 +586,31 @@ struct udma_gen_spare_reg {
 };
 
 struct udma_gen_regs_v4 {
-	struct udma_iofic_regs interrupt_regs; /* [0x0000] */
-	u32 reserved0[112];
-	struct udma_gen_axi axi; /* [0x2300] */
-	u32 reserved1[1048]; /* [0x2400] */
-	struct udma_gen_spare_reg spare_reg; /* [0x3460] */
+	struct udma_iofic_regs interrupt_regs;		     /* [0x0000] */
+	uint32_t rsrvd_0[160];
+	struct udma_gen_axi axi;                             /* [0x2300] */
+	uint32_t rsrvd_1[320];
+	struct udma_gen_axi_error_detection_table axi_error_detection_table[7]; /* [0x2900] */
+	uint32_t rsrvd_2[16];
+	struct udma_gen_axi_error_control axi_error_control[7]; /* [0x2b00] */
+	uint32_t rsrvd_3[50];
+	struct udma_gen_axi_queue axi_queue[16];             /* [0x2c00] */
+	uint32_t rsrvd_4[16];
+	uint32_t iofic_base_m2s_desc_rd;			/* [0x2d00] */
+	uint32_t rsrvd_5[63];
+	uint32_t iofic_base_m2s_data_rd;			/* [0x2e00] */
+	uint32_t rsrvd_6[63];
+	uint32_t iofic_base_m2s_cmpl_wr;			/* [0x2f00] */
+	uint32_t rsrvd_7[63];
+	uint32_t iofic_base_s2m_desc_rd;			/* [0x3000] */
+	uint32_t rsrvd_8[63];
+	uint32_t iofic_base_s2m_data_wr;			/* [0x3100] */
+	uint32_t rsrvd_9[63];
+	uint32_t iofic_base_s2m_cmpl_wr;			/* [0x3200] */
+	uint32_t rsrvd_10[63];
+	uint32_t iofic_base_msix;				    /* [0x3300] */
+	uint32_t rsrvd_11[87];
+	struct udma_gen_spare_reg spare_reg;                 /* [0x3460] */
 };
 
 struct udma_gen_ex_vmpr_v4 {

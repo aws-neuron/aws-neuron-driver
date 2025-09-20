@@ -109,7 +109,6 @@ static inline void pu_write_expl_notification_cfg_2(void __iomem *base, u8 insta
 #define PU_IMPL_NOTIFICATION_QUEUE_SIZE 0x20
 #define PU_IMPL_NOTIFICATION_OFFSET(instance_num, queue)                                           \
 	(((instance_num)*PU_INSTANCE_SIZE) + ((queue)*PU_IMPL_NOTIFICATION_QUEUE_SIZE))
-
 /** Set base address(low 32bit) of implicit notification queue for given instance and queue.
 */
 static inline void pu_write_impl_notification_cfg_0(void __iomem *base, u8 instance, u8 queue,
@@ -136,5 +135,17 @@ static inline void pu_write_impl_notification_cfg_2(void __iomem *base, u8 insta
 	const size_t offset = 0xc84 + PU_IMPL_NOTIFICATION_OFFSET(instance, queue);
 	reg_write32(base + offset, value);
 }
+
+/**
+ * pu_decode_nq_head_reg_access() - Returns NQ instance, type and queue info from given head offset.
+ *
+ * @offset - Access offset of head CSR.
+ * @nc_id - NeuronCore id corresponding to the head CSR would be stored here.
+ * @nq_type - NQ type would be stored here.
+ * @instance - NQ instance index would be stored here.
+ *
+ * @return 0 if the given offset is NQ offset and the access is to a head register.
+ */
+int pu_decode_nq_head_reg_access(u64 offset, u8 *nc_id, u32 *nq_type, u8 *instance);
 
 #endif
