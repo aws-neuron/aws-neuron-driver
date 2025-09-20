@@ -1,3 +1,6 @@
-rm -f "/etc/modules-load.d/neuron.conf"
-rmmod neuron
-rm -f /lib/udev/rules.d/neuron-udev.rules
+#!/bin/sh -e
+
+NEURON_PRES=$(dkms status | grep neuron)
+if [ -z "${NEURON_PRES}" ]; then
+    rmmod neuron
+fi

@@ -44,9 +44,9 @@ Neuron Devices implement a communication channel (FWIO) that allows the driver a
 * neuron_dma.[ch] - Provides APIs to copy data from/to device memory.
 * neuron_mempool.[ch] - Provides API to allocate host and device memory.
 * neuron_cdev.c - char device interface.
+* fw_io.[ch] - Communication channel
 * udma/* - DMA engines and queues HAL
 * v1/address_map.h - Neuron Device address space
-* v1/fw_io.[ch] - Communication channel
 * v1/putils.h - Notification HAL
 * v1/tdma.h - Additional DMA HAL functionality
 

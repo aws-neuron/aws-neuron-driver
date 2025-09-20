@@ -2,11 +2,10 @@
 
 rm -f "/etc/modules-load.d/neuron.conf"
 echo "neuron" | tee -a /etc/modules-load.d/neuron.conf
-NEURON_KO=/lib/modules/`uname -r`/updates/dkms/neuron.ko
-if [ ! -f $NEURON_KO ]; then
-    NEURON_KO=/lib/modules/`uname -r`/kernel/drivers/neuron/neuron.ko
-fi
-if [ -f $NEURON_KO ]; then
+
+NEURON_KO=$(find /lib/modules/`uname -r`  -name neuron.ko)
+
+if [ "${kernelver}" = "$(uname -r)" ] && [ -f $NEURON_KO ]; then
     depmod
     modprobe neuron
 fi

@@ -100,7 +100,7 @@ TRACE_EVENT(dma_desc_copy,
 		__field(void *,	buffer)
 		__field(u32, src_offset)
 		__field(u32, dst_offset)
-		__field(u32, size)
+		__field(u64, size)
 	),
 	TP_fast_assign(
 		__entry->device_index = nd->device_index;
@@ -112,7 +112,7 @@ TRACE_EVENT(dma_desc_copy,
 		__entry->dst_offset = dst_offset;
 		__entry->size = size;
 	),
-	TP_printk("nd%d eng%d q%d type %d src %p src_offset %x dst_offset %x size %x",
+	TP_printk("nd%d eng%d q%d type %d src %p src_offset %x dst_offset %x size %llx",
 		__entry->device_index,
 		__entry->eng_id,
 		__entry->qid,
@@ -184,7 +184,7 @@ TRACE_EVENT(ioctl_mem_alloc,
 		__entry->device_index = nd->device_index;
 		__entry->mc = mc;
 	),
-	TP_printk("nd%d nc%d %s:%llx (%d bytes) channel %d region %d mc %p",
+	TP_printk("nd%d nc%d %s:%llx (%lld bytes) channel %d region %d mc %p",
 		__entry->device_index,
 		__entry->mc->nc_id,
 		__entry->mc->mem_location == MEM_LOC_HOST ? "HOST": "DEVICE",
@@ -206,7 +206,7 @@ TRACE_EVENT(ioctl_mem_free,
 		__entry->device_index = nd->device_index;
 		__entry->mc = mc;
 	),
-	TP_printk("nd%d nc%d %s:%llx (%d bytes) mc %p",
+	TP_printk("nd%d nc%d %s:%llx (%lld bytes) mc %p",
 		__entry->device_index,
 		__entry->mc->nc_id,
 		__entry->mc->mem_location == MEM_LOC_HOST ? "HOST": "DEVICE",
@@ -228,7 +228,7 @@ TRACE_EVENT(ioctl_mem_copy,
 		__entry->src = src;
 		__entry->dst = dst;
 	),
-	TP_printk("nd%d nc%d %s:%#llx (%d bytes) => nc%d %s:%#llx",
+	TP_printk("nd%d nc%d %s:%#llx (%lld bytes) => nc%d %s:%#llx",
 		__entry->device_index,
 		__entry->src->nc_id,
 		__entry->src->mem_location == MEM_LOC_HOST ? "HOST": "DEVICE",
@@ -320,6 +320,71 @@ TRACE_EVENT(dma_memcpy,
 		__entry->pending_transfers
 	));
 
+TRACE_EVENT(bar_write,
+	TP_PROTO(struct neuron_device *nd, u32 bar, u64 offset, u32 data),
+	TP_ARGS(nd, bar, offset, data),
+	TP_STRUCT__entry(
+		__field(u32,              device_index)
+		__field(u32,              bar)
+		__field(u64,              offset)
+		__field(u32,              data)
+		),
+	TP_fast_assign(
+		__entry->device_index = nd->device_index;
+		__entry->bar = bar;
+		__entry->offset = offset;
+		__entry->data = data;
+	),
+	TP_printk("nd%d bar%d offset:%llx data:%x",
+		__entry->device_index,
+		__entry->bar,
+		__entry->offset,
+		__entry->data
+	));
+
+TRACE_EVENT(bar_read,
+	TP_PROTO(struct neuron_device *nd, u32 bar, u64 offset, u32 data),
+	TP_ARGS(nd, bar, offset, data),
+	TP_STRUCT__entry(
+		__field(u32,              device_index)
+		__field(u32,              bar)
+		__field(u64,              offset)
+		__field(u32,              data)
+	),
+	TP_fast_assign(
+		__entry->device_index = nd->device_index;
+		__entry->bar = bar;
+		__entry->offset = offset;
+		__entry->data = data;
+	),
+	TP_printk("nd%d bar%d offset:%llx data:%x",
+		__entry->device_index,
+		__entry->bar,
+		__entry->offset,
+		__entry->data
+	));
+
+#define METRICS_MAX_VALUE_LENGTH	128
+
+TRACE_EVENT(metrics_post,
+	TP_PROTO(u32 id, u32 length, const char *value),
+	TP_ARGS(id, length, value),
+	TP_STRUCT__entry(
+		__field(u32,              id)
+		__field(u32,              length)
+		__array(char, value, METRICS_MAX_VALUE_LENGTH)
+	),
+	TP_fast_assign(
+		__entry->id = id;
+		__entry->length = length;
+		memcpy(__entry->value, value, length);
+		__entry->value[length] = 0;
+	),
+	TP_printk("%u:%u:%s",
+	__entry->id,
+	__entry->length,
+	__entry->value
+));
 #endif
 
 #undef TRACE_INCLUDE_PATH
