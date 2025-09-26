@@ -100,4 +100,4 @@ To enable applications to access neuron devices without needing root privileges 
 `echo 'KERNEL=="neuron*", MODE="0666"' > /lib/udev/rules.d/neuron-udev.rules`
 ```
 
-
+We should really update this
