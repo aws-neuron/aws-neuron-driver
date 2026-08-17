@@ -54,7 +54,7 @@ int fw_io_ecc_read(void *bar0, uint64_t ecc_offset, uint32_t *ecc_err_count)
 	return 0;
 }
 
-int fw_io_misc_ram_reg_read(void *bar0, u64 offset, u32 *val)
+int fw_io_misc_ram_reg_read(void *bar0, u64 offset, u32 *val, bool log_error)
 {
 	if (offset % 4 != 0) {
 		pr_err("invalid misc ram offset, needs to be 4 byte aligned\n");
@@ -62,8 +62,10 @@ int fw_io_misc_ram_reg_read(void *bar0, u64 offset, u32 *val)
 	}
 	void *addr = bar0 + ndhal->ndhal_address_map.bar0_misc_ram_offset + offset;
 	int ret = ndhal->ndhal_fw_io.fw_io_read_csr_array(&addr, val, 1, true);
-	if (ret) {
-		pr_err("failed to read misc ram reg at offset 0x%llx\n", offset);
+	if (ret || *val == 0xdeadbeef) {
+		if (log_error) {
+			pr_err("failed to read misc ram reg at offset 0x%llx\n", offset);
+		}
 		return -EIO;
 	}
 	return 0;
@@ -866,9 +868,9 @@ int fw_io_get_performance_profile(struct fw_io_ctx *ctx, uint32_t *profile)
 		return -EINVAL;
 	}
 
-	req.type = 1;
+	req.type = FW_IO_GET_DATA_PERF_PROFILE;
 
-	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req), (u8 *)&resp, sizeof(resp));
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type), (u8 *)&resp, sizeof(resp));
 	if (ret == 0) {
 		*profile = (uint32_t)resp.profile;
 	} else {
@@ -904,22 +906,53 @@ int fw_io_enable_throttling_notifications(struct fw_io_ctx *ctx, bool enable)
 
 int fw_io_get_available_profiles(struct fw_io_ctx *ctx, u16 feature, u8 *num_profiles, u8 bitmap[32])
 {
-	struct fw_io_get_available_profiles_request req;
+	struct fw_io_get_data_request req = {0};
 	struct fw_io_get_available_profiles_response response;
 	int ret;
 	if (!ctx) {
 		return -EINVAL;
 	}
 
-	req.type = 2;
-	req.operation = feature;
+	req.type = FW_IO_GET_DATA_AVAILABLE_PROFILES;
+	req.available_profiles.operation = feature;
 
-	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8*)&req, sizeof(req), (u8*)&response, sizeof(response));
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8*)&req, sizeof(req.type) + sizeof(req.available_profiles), (u8*)&response, sizeof(response));
 	if (ret) {
 		return ret;
 	}
 
 	*num_profiles = response.num_profiles;
 	memcpy(bitmap, response.profiles_bitmap, sizeof(response.profiles_bitmap));
+	return 0;
+}
+
+int fw_io_get_bar_info(struct fw_io_ctx *ctx, u8 query_type, struct fw_io_bar_entry *entries, u8 *count)
+{
+	struct fw_io_get_data_request req = {0};
+	struct fw_io_bar_entry_response resp[NEURON_MAX_SWITCH_BARS] = {0};
+	int ret = 0;
+	int i = 0;
+
+	if (!ctx) {
+		return -EINVAL;
+	}
+
+	req.type = FW_IO_GET_DATA_BAR_INFO;
+	req.bar_info.query_type = query_type;
+
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type) + sizeof(req.bar_info), (u8 *)resp, sizeof(resp));
+	if (ret) {
+		return ret;
+	}
+
+	for (i = 0; i < NEURON_MAX_SWITCH_BARS; i++) {
+		if (resp[i].bar_type == 0) {
+			break;
+		}
+		entries[i].bar_type = resp[i].bar_type;
+		entries[i].bar_address = (u64)resp[i].bar_address << 32;
+	}
+	*count = i;
+
 	return 0;
 }

@@ -779,7 +779,12 @@ static int ncdev_get_dmabuf_fd_v2(void *param)
 	return 0;
 
 err_close_fd:
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 10, 192)
 	close_fd(dmabuf_fd);
+#else
+	__close_fd(current->files, dmabuf_fd);
+#endif
+
 	return -EFAULT;
 }
 
@@ -864,6 +869,8 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 	u64 src_offset;
 	u64 dst_offset;
 	u64 size;
+	u64 sequence_num = 0;
+	void *context = NULL;
 	int ret;
 
 	if (cmd == NEURON_IOCTL_MEM_COPY) {
@@ -876,7 +883,16 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 		src_offset = arg.src_offset;
 		dst_offset = arg.dst_offset;
 		size = arg.size;
-	dst_mc = ncdev_mem_handle_to_mem_chunk(nd, arg.dst_mem_handle);
+	} else if (cmd == NEURON_IOCTL_MEM_COPY64_DEPRECATED) {
+		struct neuron_ioctl_mem_copy64_deprecated arg;
+		ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_mem_copy64_deprecated *)param, sizeof(arg));
+		if (ret)
+			return ret;
+		src_mem_handle = arg.src_mem_handle;
+		dst_mem_handle = arg.dst_mem_handle;
+		src_offset = arg.src_offset;
+		dst_offset = arg.dst_offset;
+		size = arg.size;
 	} else if (cmd == NEURON_IOCTL_MEM_COPY64) {
 		struct neuron_ioctl_mem_copy64 arg;
 		ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_mem_copy64 *)param, sizeof(arg));
@@ -887,6 +903,8 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 		src_offset = arg.src_offset;
 		dst_offset = arg.dst_offset;
 		size = arg.size;
+		sequence_num = arg.sequence_num;
+		context = arg.context;
 	} else {
 		return -EINVAL;
 	}
@@ -908,11 +926,21 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 	}
 	ret = ndma_memcpy_mc(nd, src_mc, dst_mc, src_offset, dst_offset, size);
 	if (ret) {
-		pr_err("dma memcpy failed\n");
 		return ret;
 	}
+	if (sequence_num != 0) {
+		u32 nc_id = ndma_mc_pair_to_nc(src_mc, dst_mc);
+		int qid = ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id);
+		int submit_ret;
+
+		// Temporary fake async copy: the copy is already done, but report its result through CQE in queue order.
+		submit_ret = ndma_zerocopy_submit_completed(nd, nc_id, qid, sequence_num, 0, context);
+		if (submit_ret) {
+			return submit_ret;
+		}
+	}
 	trace_ioctl_mem_copy(nd, src_mc, dst_mc);
-	return 0;
+	return ret;
 }
 
 static int ncdev_mem_copy_async(struct neuron_device *nd, unsigned int cmd, void *param)
@@ -1256,6 +1284,8 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 	u64 size;
 	u32 bar4_wr_threshold;
 	int h2t_qid;
+	u32 nc_id;
+	int qid;
 	int ret;
 	struct neuron_ioctl_mem_buf_copy64zc arg;
 	bool use_bar4_wr;
@@ -1292,6 +1322,13 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 		return -EFAULT;
 	}
 
+	nc_id = ndma_mc_pair_to_nc(mc, mc);
+	qid = (h2t_qid == NEURON_DMA_H2T_DEFAULT_QID) ? ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id) : h2t_qid;
+	if (!ndmar_qid_valid(qid)) {
+		pr_err("nd%02d: invalid h2t queue index %d", nd->device_index, qid);
+		return -ENOENT;
+	}
+
 	// limit to internal threshold to prevent DoS attack
 	bar4_wr_threshold = (arg.bar4_wr_threshold < BAR4_WR_THRESHOLD_MAX) ? arg.bar4_wr_threshold : BAR4_WR_THRESHOLD_MAX;
 	use_bar4_wr = !narch_is_qemu() &&
@@ -1319,17 +1356,16 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 		if (unlikely(ret)) {
 			ret = neuron_copy_from_user(__func__, nd->npdev.bar4 + cpy_offset, buffer, size);
 		}
+
+		// for async mode, BAR4 write is already done; enqueue a completed ctx to preserve CQE order.
+		// for sync mode, return the BAR4 write result directly
+		if (sequence_num != 0) {
+			ret = ndma_zerocopy_submit_completed(nd, nc_id, qid, sequence_num, ret, context);
+		}
+		return ret;
 	} else {
 		nrt_tensor_batch_op_t op;
-
-		u32 nc_id    = ndma_mc_pair_to_nc(mc, mc);
-		int qid      = (h2t_qid == NEURON_DMA_H2T_DEFAULT_QID) ? ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id) : h2t_qid;
 		dma_addr_t dev_base = ndma_mc_to_pa(mc); // the caller already does the range check for dev_base+offset
-
-		if (!ndmar_qid_valid(qid)) {
-			pr_err("nd%02d: invalid h2t queue index %d", nd->device_index, qid);
-			return -ENOENT;
-		}
 
 		if (!ndma_zerocopy_supported()) {
 			pr_err_once("nd%02d: zero copy is not supported for architectures requiring DMA retry", nd->device_index);
@@ -1343,9 +1379,8 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 		ret = ndma_zerocopy_submit(nd, nc_id, &op, 1, dev_base, qid,
 					   copy_to_mem_handle ? true : false,
 					   sequence_num, context);
+		return ret;
 	}
-
-	return ret;
 }
 
 static int ncdev_mem_buf_zerocopy64_batch(struct neuron_device *nd, void *param)
@@ -2027,7 +2062,8 @@ static long ncdev_driver_info(unsigned int cmd, void *param)
 										 NEURON_DRIVER_FEATURE_ZEROCOPY | NEURON_DRIVER_FEATURE_PINNED_HOST_MEM |
 										 NEURON_DRIVER_FEATURE_ALLOC_WITH_PA;
 			if (ndma_zerocopy_supported())
-				driver_info.feature_flags1 |= NEURON_DRIVER_FEATURE_ASYNC_IO;
+				driver_info.feature_flags1 |= NEURON_DRIVER_FEATURE_ASYNC_RW |
+							      NEURON_DRIVER_FEATURE_ASYNC_COPY;
 
 			return copy_to_user(param, &driver_info, sizeof(driver_info));
 		}
@@ -3342,6 +3378,34 @@ inline static long ncdev_misc_ioctl(struct file *filep, unsigned int cmd, unsign
 	return -EINVAL;
 }
 
+static int ncdev_get_fw_bars(struct neuron_device *nd, void *param)
+{
+	struct neuron_ioctl_get_bar_info arg;
+	int ret;
+	int i;
+
+	ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_get_bar_info *)param, sizeof(arg));
+	if (ret) {
+		return ret;
+	}
+
+	if (arg.query_type == 0 || arg.query_type > NEURON_MAX_BAR_QUERY_TYPES) {
+		return -EINVAL;
+	}
+
+	if (!nd->bar_info[arg.query_type - 1].cached) {
+		return -EAGAIN;
+	}
+
+	arg.count = nd->bar_info[arg.query_type - 1].count;
+	for (i = 0; i < arg.count; i++) {
+		arg.bar_types[i] = nd->bar_info[arg.query_type - 1].bars[i].bar_type;
+		arg.bars[i] = nd->bar_info[arg.query_type - 1].bars[i].bar_address;
+	}
+
+	return copy_to_user(param, &arg, sizeof(arg));
+}
+
 static long ncdev_ioctl(struct file *filep, unsigned int cmd, unsigned long param)
 {
 	struct ncdev *ncd;
@@ -3538,6 +3602,8 @@ static long ncdev_ioctl(struct file *filep, unsigned int cmd, unsigned long para
 		return ncdev_available_perf_profiles(nd, (void*)param);
 	} else if (cmd == NEURON_IOCTL_GET_ASYNC_H2T_DMA_COMPL_QUEUES) {
 		return ncdev_get_async_h2d_dma_compl_queues(nd, (void*)param);
+	} else if (cmd == NEURON_IOCTL_GET_BAR_INFO) {
+		return ncdev_get_fw_bars(nd, (void*)param);
 	}
 
 	// B/W compatibility

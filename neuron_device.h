@@ -26,6 +26,7 @@
 #include "neuron_sysfs_metrics.h"
 #include "neuron_log.h"
 #include "neuron_power.h"
+#include "neuron_fw_io.h"
 
 #ifndef static_assert
 #define static_assert(expr, ...)
@@ -41,6 +42,9 @@
 
 // Global host memory buf size used for memset the device memory
 #define MEMSET_HOST_BUF_SIZE MAX_DMA_DESC_SIZE // guessed optimal DMA transfer and PCIe TLP size.
+
+// PCI BAR addresses on switched fabrics
+#define NEURON_MAX_BAR_QUERY_TYPES 2
 
 struct neuron_pci_device {
 	phys_addr_t bar0_pa;
@@ -65,6 +69,12 @@ struct neuron_hbm_scrub_ctx {
 	struct mem_chunk *tx_mc[NUM_DMA_ENG_PER_DEVICE];
 	struct mem_chunk *completion_marker_buf[MAX_NUM_HBMS]; // one memchunk shared by all DMA engines for an HBM to reduce internal fragmentation
 	struct mem_chunk *hostbuf_mc[NUM_DMA_ENG_PER_DEVICE];
+};
+
+struct neuron_device_bar_info {
+	bool cached;
+	u8 count;
+	struct fw_io_bar_entry bars[NEURON_MAX_SWITCH_BARS];
 };
 
 struct neuron_device {
@@ -119,6 +129,8 @@ struct neuron_device {
 	struct neuron_log_obj log_obj; // logging object
 
 	struct neuron_hbm_scrub_ctx hbm_scrub_ctx;
+
+	struct neuron_device_bar_info bar_info[NEURON_MAX_BAR_QUERY_TYPES];
 
 	// volatile to prevent compiler optimizations since accessed by different threads
 	// Indicates whether any performance profile with 7200 Mhz HBM is supported by this device

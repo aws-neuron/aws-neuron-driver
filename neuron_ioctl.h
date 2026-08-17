@@ -143,6 +143,17 @@ struct neuron_ioctl_mem_copy64 {
 	__u64 size; // [in] Size of the transfer.
 	__u64 src_offset; // [in] Offset in the source memory handle.
 	__u64 dst_offset; // [in] Offset in the destination memory handle.
+	__u64 sequence_num; // [in] The sequence number that uniquely identifies each async I/O.
+	void *context; // [in] Opaque context pointer passed back in the completion queue.
+};
+
+// Old drivers use the same mem copy ioctl number with this smaller payload.
+struct neuron_ioctl_mem_copy64_deprecated {
+	__u64 src_mem_handle; // [in] Source memory handle from where data is copied.
+	__u64 dst_mem_handle; // [in] Destination memory handle to data is to be copied.
+	__u64 size; // [in] Size of the transfer.
+	__u64 src_offset; // [in] Offset in the source memory handle.
+	__u64 dst_offset; // [in] Offset in the destination memory handle.
 };
 
 struct neuron_ioctl_mem_copy_async {
@@ -706,6 +717,14 @@ struct neuron_ioctl_host_mem_unpin {
 	__u64 va;			// [in] VA to unpin (must match exact VA from pin)
 };
 
+#define NEURON_IOCTL_MAX_BAR_ENTRIES	16
+struct neuron_ioctl_get_bar_info {
+	__u32 query_type;                                  // [in] 1=INTER_SERVER, 2=INTRA_SERVER
+	__u32 count;                                       // [out] num valid entries
+	__u32 bar_types[NEURON_IOCTL_MAX_BAR_ENTRIES];     // [out] enum neuron_switch_fabric_bar_type
+	__u64 bars[NEURON_IOCTL_MAX_BAR_ENTRIES];          // [out] 64-bit PCIe BAR address
+};
+
 #define NEURON_IOCTL_BASE 'N'
 
 /* Deprecated reset related IOCTLs. Now it would always return success. */
@@ -737,6 +756,7 @@ struct neuron_ioctl_host_mem_unpin {
 #define NEURON_IOCTL_MEM_FREE _IOR(NEURON_IOCTL_BASE, 22, struct neuron_ioctl_mem_free *)
 /** Copy data between two memory handles. (using DMA) */
 #define NEURON_IOCTL_MEM_COPY _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy *)
+#define NEURON_IOCTL_MEM_COPY64_DEPRECATED _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy64_deprecated)
 #define NEURON_IOCTL_MEM_COPY64 _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy64)
 
 /** Copy data from/to given host buffer to/from memory_handle. (using DMA)*/
@@ -934,5 +954,8 @@ struct neuron_ioctl_host_mem_unpin {
 
 /** Get dma-buf file-descriptor with offset (v2) */
 #define NEURON_IOCTL_DMABUF_FD_V2 _IOR(NEURON_IOCTL_BASE, 138, struct neuron_ioctl_dmabuf_fd_v2 *)
+
+/** Get switch fabric BAR info for a device */
+#define NEURON_IOCTL_GET_BAR_INFO _IOWR(NEURON_IOCTL_BASE, 139, struct neuron_ioctl_get_bar_info)
 
 #endif

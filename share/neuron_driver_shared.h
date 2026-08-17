@@ -23,7 +23,15 @@ enum neuron_driver_feature_flag {
 	NEURON_DRIVER_FEATURE_ZEROCOPY = 1ull << 8,
 	NEURON_DRIVER_FEATURE_PINNED_HOST_MEM = 1ull << 9,
 	NEURON_DRIVER_FEATURE_ALLOC_WITH_PA   = 1ull << 10,
-	NEURON_DRIVER_FEATURE_ASYNC_IO        = 1ull << 11,
+	NEURON_DRIVER_FEATURE_ASYNC_RW        = 1ull << 11, // async H2D/D2H read/write
+	NEURON_DRIVER_FEATURE_ASYNC_COPY      = 1ull << 12, // async D2D copy
+};
+
+enum neuron_switch_fabric_bar_type {
+	NEURON_SWITCH_FABRIC_BAR_TYPE_HBM = 0x01,
+	NEURON_SWITCH_FABRIC_BAR_TYPE_CTRL = 0x02,
+	NEURON_SWITCH_FABRIC_BAR_TYPE_AC = 0x03,
+	NEURON_SWITCH_FABRIC_BAR_TYPE_MC = 0x04,
 };
 
 // FIXME  this should be more generic - like node type.
@@ -361,6 +369,9 @@ enum {
 	NDS_NC_COUNTER_COUNT = NDS_NC_COUNTER_LAST + NDS_NC_COUNTER_RESERVED
 };
 
+#define NDS_NC_MEM_USAGE_DEVICE_COUNTER_COUNT (NDS_NC_COUNTER_MEM_USAGE_MISC_DEVICE - NDS_NC_COUNTER_MEM_USAGE_CODE_DEVICE + 1)
+#define NDS_NC_MEM_USAGE_DEVICE_SIZE (NDS_NC_MEM_USAGE_DEVICE_COUNTER_COUNT * sizeof(uint64_t))
+
 #define NDS_MAX_NEURONCORE_COUNT     (4)
 #define NDS_EXT_MAX_NEURONCORE_COUNT (12)
 
@@ -418,6 +429,11 @@ typedef struct nds_header {
 #define NDS_EXT_NEURONCORE_NC_DATA_SIZE_OLD	(NDS_TOTAL_NC_COUNTER_COUNT_OLD * NDS_EXT_MAX_NEURONCORE_COUNT * sizeof(uint64_t))
 #define NDS_EXT_SECTION_SIZE_OLD (NDS_EXT_NEURONCORE_COUNTERS_SIZE_OLD + NDS_EXT_NEURONCORE_NC_DATA_SIZE_OLD)
 #define NDS_EXT_OFFSET_OLD (44588)
+
+// Objects section: stores process info, model info map, model info entries, and process ext info.
+// Starts immediately after the primary NC counters section and ends at the old extended counters offset.
+#define NDS_OBJECTS_START (NDS_NEURONCORE_COUNTERS_START + NDS_NEURONCORE_COUNTERS_SIZE)
+#define NDS_OBJECTS_SIZE  (NDS_EXT_OFFSET_OLD - NDS_OBJECTS_START)
 
 #define NDS_EXT_ALIGNMENT (64)
 #define NDS_ALIGN(v) ((v) + (-(v) & (NDS_EXT_ALIGNMENT - 1)))

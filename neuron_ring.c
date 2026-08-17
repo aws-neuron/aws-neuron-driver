@@ -818,6 +818,14 @@ static void ndmar_h2t_ring_free_all(struct neuron_device *nd, int nc_idx)
 	for (qid = 0; qid < ndhal->ndhal_udma.num_queues; qid++) {
 		queue = ndmar_get_queue(eng, qid);
 		ring = ndmar_get_ring(queue);
+
+		// The default queues do not go through the ndmar_h2t_ring_request path
+		// So they should be handled specially at cleanup too
+		if (qid == ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_idx)) {
+			ndmar_h2t_ring_free(eng, ring);
+			continue;
+		}
+
 		if (ndmar_h2t_ring_is_allocated(ring) && ring->h2t_nc_id == nc_idx) {
 			if (ndmar_h2t_ring_is_h2t(ring)) {
 				// h2t queue free all resources

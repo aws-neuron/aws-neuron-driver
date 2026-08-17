@@ -949,7 +949,7 @@ enum ndma_zcdma_state {
 	NDMA_UNPINNED,
 	NDMA_PINNED_UNSUBMITTED,
 	NDMA_SUBMITTED,
-	NDMA_COMPLETED, // not in dma context queue anymore
+	NDMA_COMPLETED, // completed transfer waiting to be harvested from ctx queue to CQ
 };
 
 /* DMA context */
@@ -983,6 +983,8 @@ struct ndma_h2t_zcdma_context {
 
 	// Async-only
 	struct mm_struct     *mm;                 // mm that owns the user buffers
+	s64                   compl_ret;          // result for in-order CQ completion of completed work. Only valid for async.
+											  // used only for async BAR4 writes and temporary fake-async D2D copy
 };
 
 static void ndma_pinned_mem_process_release(struct kref *kref);
@@ -992,7 +994,7 @@ static void ndma_zc_release_ctx(struct ndma_h2t_zcdma_context *ctx, u64 *nr_pinn
 	// do not free or set completion_ptr null. it is managed by completion_pool in ctx queue
 	// do not free or set page_list null. it is managed by page_list_pool in ctx queue
 
-	if (ctx->state >= NDMA_PINNED_UNSUBMITTED) {
+	if (ctx->state >= NDMA_PINNED_UNSUBMITTED && ctx->nr_pages > 0) {
 		/* Only unpin if we pinned it ourselves (not pre-pinned memory) */
 		if (!ctx->prepin_proc) {
 			if (ctx->direction) {
@@ -1017,6 +1019,7 @@ static void ndma_zc_release_ctx(struct ndma_h2t_zcdma_context *ctx, u64 *nr_pinn
 	ctx->state = NDMA_INVALID;
 	ctx->sequence_num = 0;
 	ctx->context = NULL;
+	ctx->compl_ret = 0;
 }
 
 /* H2D DMA Completion Queue (CQ) */
@@ -1068,10 +1071,15 @@ void ndma_h2d_compl_queue_destroy(struct ndma_h2d_compl_queue *compl_queue)
 	compl_queue->tail = 0;
 }
 
+/*
+ * Emit the CQE for an accepted async io request. Caller must hold the ring
+ * lock that serializes compl_queue->tail. Submission failures return an error
+ * to userspace and must not call this function to emit a CQE.
+ */
 static void ndma_h2d_compl_queue_put(struct ndma_h2d_compl_queue *compl_queue,
-									 u64 sequence_num,
-									 s64 compl_ret,
-									 void *context)
+							  u64 sequence_num,
+							  s64 compl_ret,
+							  void *context)
 {
 	u32 head = 0;
 	u32 tail = 0;
@@ -1178,7 +1186,7 @@ static void ndma_ctx_queue_inc_tail(struct ndma_ctx_queue *queue)
 	// Assume the ctx at old tail is already filled by caller
 	// Tail advance may also initialize/advance the pinned+unsubmitted and unpinned pointers
 	struct ndma_h2t_zcdma_context *ctx = &queue->entries[old_tail];
-	if (ctx->state == NDMA_PINNED_UNSUBMITTED) {
+	if (ctx->state == NDMA_PINNED_UNSUBMITTED || ctx->state == NDMA_COMPLETED) {
 		if (ndma_ctx_queue_pinned_unsubmitted_empty(queue)) {
 			// The first pinned+unsubmitted pointer appears at old_tail
 			queue->first_pinned_unsubmitted = old_tail;
@@ -1862,6 +1870,53 @@ done:
 	return ret;
 }
 
+int ndma_zerocopy_submit_completed(struct neuron_device *nd, u32 nc_id, int qid,
+				   u64 sequence_num, s64 compl_ret, void *context)
+{
+	const int eng_id = ndhal->ndhal_ndmar.ndmar_get_h2t_eng_id(nd, nc_id);
+	struct ndma_eng *eng = &nd->ndma_engine[eng_id];
+	struct ndma_ring *ring = &eng->queues[qid].ring_info;
+	struct ndma_ctx_queue *ctx_queue = &ring->dma_ctx_queue;
+	struct ndma_h2t_zcdma_context *ctx;
+	int ret;
+
+	if (!ndmar_h2t_ring_is_owner(ring, nc_id)) {
+		pr_err("nd%02d: attempting to use qid %d that was not assigned to nc %d\n",
+		       nd->device_index, qid, nc_id);
+		return -ENOENT;
+	}
+
+	ret = ndma_h2d_create_cmpltn_thread(nd);
+	if (ret) {
+		return ret;
+	}
+
+	mutex_lock(&ring->h2t_ring_lock);
+	if (ndma_ctx_queue_is_full(ctx_queue)) {
+		mutex_unlock(&ring->h2t_ring_lock);
+		return -EBUSY;
+	}
+
+	ctx = ndma_ctx_queue_peek_tail(ctx_queue);
+	ctx->eng = eng;
+	ctx->ring = ring;
+	ctx->direction = true;
+	ctx->last = true;
+	ctx->nr_pages = 0;
+	ctx->nr_desc = 0;
+	ctx->state = NDMA_COMPLETED;
+	ctx->sequence_num = sequence_num;
+	ctx->context = context;
+	ctx->compl_ret = compl_ret;
+	ndma_ctx_queue_inc_tail(ctx_queue);
+	mutex_unlock(&ring->h2t_ring_lock);
+
+	atomic64_or(BIT_ULL(ndhal->ndhal_ndmar.ndmar_ctx_queue_bit(eng_id, qid)),
+		    &nd->dma_cmpltn_thread.nonempty_ctxq_bitmap);
+	wake_up(&nd->dma_cmpltn_thread.wait_queue);
+	return 0;
+}
+
 /* The completion flow for completion, remote pinning, and submission. Async IO only */
 static int ndma_zerocopy_complete(struct neuron_device *nd,
 								  struct ndma_eng *eng,
@@ -1897,7 +1952,13 @@ static int ndma_zerocopy_complete(struct neuron_device *nd,
 		}
 		struct ndma_h2t_zcdma_context *submitted_ctx = ndma_ctx_queue_pop_submitted(ctx_queue);
 
-		ret = ndma_memcpy_wait_for_completion(eng, ring, submitted_ctx->nr_desc + 1, submitted_ctx->completion_ptr, true, false);
+		if (submitted_ctx->state == NDMA_COMPLETED) {
+			// Dummy context: BAR4/fake-async copy completed before enqueue.
+			ret = submitted_ctx->compl_ret;
+		} else {
+			ret = ndma_memcpy_wait_for_completion(eng, ring, submitted_ctx->nr_desc + 1,
+							      submitted_ctx->completion_ptr, true, false);
+		}
 		if (ret) {
 			err = ret;
 			pr_err("async h2d dma completion failed for seq num %llu: %d\n", submitted_ctx->sequence_num, ret);
@@ -1915,7 +1976,16 @@ static int ndma_zerocopy_complete(struct neuron_device *nd,
 	while (true) {
 		struct ndma_h2t_zcdma_context *pinned_unsubmitted_ctx = ndma_ctx_queue_peek_pinned_unsubmitted(ctx_queue);
 
-		if (!pinned_unsubmitted_ctx || !_ndma_zc_descs_available(eng, ring->qid, pinned_unsubmitted_ctx->nr_pages)) {
+		if (!pinned_unsubmitted_ctx) {
+			break;
+		}
+		if (pinned_unsubmitted_ctx->state == NDMA_COMPLETED) {
+			// Dummy context has no DMA descriptors; preserve CQ order only.
+			ndma_ctx_queue_inc_first_pinned_unsubmitted(ctx_queue);
+			did_work = true;
+			continue;
+		}
+		if (!_ndma_zc_descs_available(eng, ring->qid, pinned_unsubmitted_ctx->nr_pages)) {
 			break;
 		}
 

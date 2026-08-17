@@ -16,6 +16,9 @@
 #include "neuron_device.h"
 
 #define NEURON_LOG_NUM_ENTRIES 1024
+#define NEURON_LOG_INDEX_MASK (NEURON_LOG_NUM_ENTRIES - 1)
+static_assert(NEURON_LOG_NUM_ENTRIES && !(NEURON_LOG_NUM_ENTRIES & (NEURON_LOG_NUM_ENTRIES - 1)),
+	      "NEURON_LOG_NUM_ENTRIES must be a power of 2 for mask indexing");
 
 static const char * neuron_log_rec_type_to_str( enum neuron_log_type type)
 {
@@ -105,13 +108,17 @@ int neuron_log_dump(struct neuron_device *nd, pid_t pid, uint32_t log_dump_limit
 	}
 
 	// grab a copy of the log
-	tail_index = (atomic_read(&nd->log_obj.tail) - 1) % NEURON_LOG_NUM_ENTRIES;
+	// Note: atomic_t is a signed int. After 2^31 ioctls log_obj.tail wraps
+	// negative and signed '%' on a negative dividend yields a negative result,
+	// which when assigned to uint32_t becomes ~4.29B and causes the print loop
+	// below to never terminate. Cast to unsigned and use a power-of-2 bitmask.
+	tail_index = ((unsigned int)atomic_read(&nd->log_obj.tail) - 1) & NEURON_LOG_INDEX_MASK;
 	memcpy(log_snapshot, nd->log_obj.log, sizeof(struct neuron_log_rec) * NEURON_LOG_NUM_ENTRIES);
 
 	// scan backwards
 	//
 	for (i=1, j=0; i < NEURON_LOG_NUM_ENTRIES-1; i++) {
-		struct neuron_log_rec * log_rec = &log_snapshot[(tail_index-i) % NEURON_LOG_NUM_ENTRIES];
+		struct neuron_log_rec * log_rec = &log_snapshot[(tail_index-i) & NEURON_LOG_INDEX_MASK];
 
 		if ((log_rec->type == NEURON_LOG_TYPE_INVALID) || (pid && log_rec->pid != pid)) {
 			continue;
@@ -128,11 +135,11 @@ int neuron_log_dump(struct neuron_device *nd, pid_t pid, uint32_t log_dump_limit
 
 	// print forwards
 	//
-	i = (tail_index-i) % NEURON_LOG_NUM_ENTRIES;
+	i = (tail_index-i) & NEURON_LOG_INDEX_MASK;
 	while (i != tail_index)  {
 		struct neuron_log_rec * log_rec = &log_snapshot[i];
 
-		i = (i+1) % NEURON_LOG_NUM_ENTRIES;
+		i = (i+1) & NEURON_LOG_INDEX_MASK;
 		if ((log_rec->type == NEURON_LOG_TYPE_INVALID) || (pid && log_rec->pid != pid)) {
 			continue;
 		}

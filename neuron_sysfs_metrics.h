@@ -8,12 +8,13 @@
 
 #define MAX_CHILD_NODES_NUM	    32
 #define NON_NDS_COUNTER_COUNT   64
-#define MAX_METRIC_ID           (NDS_ND_COUNTER_COUNT + NDS_EXT_NC_COUNTER_LAST + NON_NDS_COUNTER_COUNT)
+#define NDS_COUNTER_COUNT       (NDS_EXT_NC_COUNTER_LAST + NDS_ND_COUNTER_COUNT)
+#define MAX_METRIC_ID           (NDS_COUNTER_COUNT + NON_NDS_COUNTER_COUNT)
 #define MAX_COUNTER_ATTR_TYPE_COUNT	3
 
 #define NDS_NC_COUNTER_ID_TO_SYSFS_METRIC_ID(nds_id) (nds_id)
 #define NDS_ND_COUNTER_ID_TO_SYSFS_METRIC_ID(nds_id) (nds_id + NDS_EXT_NC_COUNTER_LAST)
-#define NON_NDS_ID_TO_SYSFS_METRIC_ID(non_nds_id)    (non_nds_id + NDS_ND_COUNTER_COUNT + NDS_EXT_NC_COUNTER_LAST)
+#define NON_NDS_ID_TO_SYSFS_METRIC_ID(non_nds_id)    (non_nds_id + NDS_COUNTER_COUNT)
 
 #define ATTR_INFO(_attr_name, _metric_id, _attr_type) { \
     .attr_name = _attr_name,                            \
@@ -65,8 +66,10 @@ enum nsysfsmetric_non_nds_ids { // The metrics needed by sysfs metrics but not s
 	NON_NDS_COUNTER_MODEL_LOAD_COUNT,
 	NON_NDS_COUNTER_INFERENCE_COUNT,
 	NON_NDS_COUNTER_ECC_SRAM_UNCORRECTED,
+	NON_NDS_COUNTER_ECC_SRAM_CORRECTED,
 	NON_NDS_COUNTER_ECC_HBM_UNCORRECTED,
 	NON_NDS_COUNTER_ECC_REPAIRABLE_HBM_UNCORRECTED,
+	NON_NDS_COUNTER_ECC_HBM_CORRECTED,
 	NON_NDS_COUNTER_PE_ARRAY_ACTIVITY,
 	NON_NDS_OTHER_NEURON_ARCH_TYPE,
 	NON_NDS_OTHER_NEURON_INSTANCE_TYPE,
@@ -74,10 +77,9 @@ enum nsysfsmetric_non_nds_ids { // The metrics needed by sysfs metrics but not s
 	NON_NDS_OTHER_NOTIFY_DELAY,
 	NON_NDS_OTHER_SERIAL_NUMBER,
 	NON_NDS_OTHER_POWER_UTILIZATION,
-	NON_NDS_HEALTH_STATUS_SRAM_UE_COUNT,
-	NON_NDS_HEALTH_STATUS_HBM_UE_COUNT,
-	NON_NDS_HEALTH_STATUS_REPAIRABLE_HBM_UE_COUNT,
 	NON_NDS_HEALTH_STATUS_HW_ERROR_EVENT,
+	NON_NDS_HEALTH_STATUS_OVERALL_HEALTH,
+	NON_NDS_HEALTH_STATUS_HEARTBEAT,
 	NON_NDS_OTHER_POWER_UTILIZATION_RAW,
 };
 
@@ -92,13 +94,8 @@ struct sysfs_mem_thread {
 // Cache slot identifiers for misc RAM registers whose values are exposed under
 // stats/hardware/health_status/. Add a new value here when caching a new register.
 enum health_status_cache_slot {
-	HEALTH_STATUS_SLOT_SRAM_ECC,
-	HEALTH_STATUS_SLOT_HBM0_ECC,
-	HEALTH_STATUS_SLOT_HBM1_ECC,
-	HEALTH_STATUS_SLOT_HBM2_ECC,
-	HEALTH_STATUS_SLOT_HBM3_ECC,
-	HEALTH_STATUS_SLOT_HBM_REPAIR_STATE,
-	HEALTH_STATUS_SLOT_FW_API_VERSION,
+	HEALTH_STATUS_SLOT_HEALTH_STATUS_CHECK,
+	HEALTH_STATUS_SLOT_HEALTH_STATUS_SEQ,
 	HEALTH_STATUS_SLOT_COUNT,
 };
 
@@ -119,6 +116,7 @@ struct nsysfsmetric_node { // represent a subdirectory in sysfs
 };
 
 struct nsysfsmetric_metrics { // per neuron_device
+    struct neuron_device *nd;
     struct nsysfsmetric_node root; // represent the neuron device
     struct nsysfsmetric_node *dynamic_metrics_dirs[MAX_NC_PER_DEVICE];
     struct nsysfsmetric_counter nrt_metrics[MAX_METRIC_ID][MAX_NC_PER_DEVICE]; // runtime metrics per NC, indiced by metric_id and nc_id
@@ -132,6 +130,7 @@ struct nsysfsmetric_metrics { // per neuron_device
     // Indexed by enum health_status_cache_slot.
     u32 cached_health_regs[HEALTH_STATUS_SLOT_COUNT];
     u32 hw_error_event_count;
+    bool health_check_regs_read_failed;
     struct nsysfsmetric_node *hardware_node;     // stats/hardware/; cached so health_status can attach under it
     struct nsysfsmetric_node *health_status_node; // target for sysfs_notify on hw_error_event
 };
@@ -184,14 +183,6 @@ struct nsysfsmetric_node *nsysfsmetric_init_and_add_one_node(struct nsysfsmetric
  * @param ds_val: the value from datastore to be aggregated with the current bitmap
  */
 int nsysfsmetric_init_and_add_dynamic_counter_nodes(struct neuron_device *nd, uint64_t ds_val);
-
-/**
- * nsysfsmetric_nds_aggregate() - Aggregate sysfs metrics from datastore when a process exits
- * 
- * @param nd: The pointer to the neuron_device
- * @param entry: : The pointer to the datastore entry
- */
-void nsysfsmetric_nds_aggregate(struct neuron_device *nd, struct neuron_datastore_entry *entry);
 
 /**
  * nsysfsmetric_inc_counter() - Increment the counter with metric_id for neuron_device nd and neuron core nc_id by delta

@@ -425,6 +425,11 @@ static u8 nnq_get_nqid_v2(struct neuron_device *nd, u8 nc_id, u8 index, u32 nq_t
     return (nq_type * V2_MAX_NQ_QUEUES) + index;
 }
 
+static u8 nnq_get_nq_queue_count_v2(void)
+{
+    return V2_MAX_NQ_QUEUES;
+}
+
 /**
  * nnq_set_hwaddr() - set the physical address of the queue
  * 
@@ -1446,6 +1451,7 @@ int ndhal_register_funcs_v2(void) {
 	ndhal->ndhal_nc.nc_get_event_addr = nc_get_event_addr_v2;
 	ndhal->ndhal_nq.nnq_get_nqid = nnq_get_nqid_v2;
 	ndhal->ndhal_nq.nnq_set_hwaddr = nnq_set_hwaddr_v2;
+	ndhal->ndhal_nq.nnq_get_nq_queue_count = nnq_get_nq_queue_count_v2;
 	ndhal->ndhal_mpset.mp_min_alloc_size = (mempool_min_alloc_size < 1024) ? 1024 : mempool_min_alloc_size;  // v2 has a bigger mem size and gen pool create fails if < 1024
 	ndhal->ndhal_mpset.small_pool_supported = true;
 	ndhal->ndhal_mpset.mpset_set_dram_and_mpset_info = mpset_set_dram_and_mpset_info_v2;
@@ -1470,6 +1476,7 @@ int ndhal_register_funcs_v2(void) {
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_ecc_nodes = nsysfsmetric_add_ecc_nodes_v2;
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_get_hbm_error_count = nsysfsmetric_get_hbm_error_count_v2;
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_tensor_engine_node = nsysfsmetric_add_tensor_engine_node_v2;
+	ndhal->ndhal_sysfs_metrics.health_status_enabled = false;
 	ndhal->ndhal_pci.axi_bar = BAR_UNUSED;
 	ndhal->ndhal_pci.dram_bar = 4;
 	ndhal->ndhal_pci.neuron_pci_get_device_id = neuron_pci_get_device_id_v2;

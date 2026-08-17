@@ -76,9 +76,23 @@ union fw_io_req_perfprofile_data {
 	uint32_t raw[2];
 };
 
+enum fw_io_get_data_type {
+	FW_IO_GET_DATA_PERF_PROFILE = 0x01,
+	FW_IO_GET_DATA_AVAILABLE_PROFILES = 0x02,
+	FW_IO_GET_DATA_BAR_INFO = 0x10,
+};
+
 struct fw_io_get_data_request {
 	uint8_t type;
-};
+	union {
+		struct {
+			uint16_t operation;
+		} available_profiles;
+		struct {
+			uint8_t query_type;
+		} bar_info;
+	};
+} __packed;
 
 struct fw_io_get_perfprofile_response {
 	uint8_t reserved[4];
@@ -88,15 +102,24 @@ struct fw_io_get_perfprofile_response {
 	uint8_t ocw;
 };
 
-struct fw_io_get_available_profiles_request {
-	uint8_t type; // must be 2
-	uint16_t operation; 
-} __packed;
-
 struct fw_io_get_available_profiles_response {
 	uint8_t num_profiles;
-	uint8_t profiles_bitmap[32]; 
+	uint8_t profiles_bitmap[32];
 };
+
+#define NEURON_MAX_SWITCH_BARS 16
+
+struct fw_io_bar_entry_response {
+	uint8_t bar_type;
+	uint8_t reserved[3];
+	uint32_t bar_address;
+} __packed;
+
+struct fw_io_bar_entry {
+	uint8_t bar_type;
+	uint64_t bar_address;
+};
+
 
 enum fw_io_get_available_profiles_feature {
 	FW_IO_AVAILABLE_PERF_PROFILES_ALL = 0,
@@ -145,6 +168,8 @@ enum {
 	//   - The value of this register is used to determine the offset of other registers.
 	FW_IO_REG_API_VERSION_OFFSET = 0x00,
 
+	FW_IO_REG_HEALTH_CHECK_STATUS_OFFSET = 0x04, // reg 1
+	FW_IO_REG_HEALTH_CHECK_SEQ_OFFSET = 0x0C, // reg 3
 
 	// MISC RAM instance/partition size info
 	// (0:5) instance size, 16:30 partition size, 31 partition size valid
@@ -242,6 +267,13 @@ enum {
 #define _REG_SERVERINFO_RVALIDSHIFT 	31
 #define _REG_SERVERINFO_RVALIDMASK		((1 << _REG_SERVERINFO_RVALIDBITS)-1)
 #define _REG_SERVERINFO_RVALID(rval)	(((rval) >> _REG_SERVERINFO_RVALIDSHIFT) & _REG_SERVERINFO_RVALIDMASK)
+
+// healthcheck regs - Reg 3 field extraction
+#define _REG_HEALTHCHECK_HEARTBEATBITS	8
+#define _REG_HEALTHCHECK_HEARTBEATSHIFT 12
+#define _REG_HEALTHCHECK_HEARTBEATMASK	((1 << _REG_HEALTHCHECK_HEARTBEATBITS)-1)
+#define _REG_HEALTHCHECK_HEARTBEAT(val)	(((val) >> _REG_HEALTHCHECK_HEARTBEATSHIFT) & _REG_HEALTHCHECK_HEARTBEATMASK)
+
 
 //
 #define FW_IO_REG_METRIC_BUF_SZ 128
@@ -507,9 +539,10 @@ int fw_io_ecc_read(void *bar0, uint64_t ecc_offset, uint32_t *ecc_err_count);
  * @param bar0: mapped BAR0 base
  * @param offset: byte offset of the register within the misc RAM block (e.g., FW_IO_REG_*_OFFSET)
  * @param val: output register value
+ * @param log_error: whether to log an error in dmesg (false for periodic read which will create too much noise)
  * @return 0 on success
  */
-int fw_io_misc_ram_reg_read(void *bar0, u64 offset, u32 *val);
+int fw_io_misc_ram_reg_read(void *bar0, u64 offset, u32 *val, bool log_error);
 
 /**
  * fw_io_serial_number_read() - Read serial number
@@ -590,5 +623,14 @@ int fw_io_enable_throttling_notifications(struct fw_io_ctx *ctx, bool enable);
  * @param bitmap: Bitmap of supported profiles in response
  */
 int fw_io_get_available_profiles(struct fw_io_ctx *ctx, u16 feature, u8 *num_profiles, u8 bitmap[32]);
+
+/**
+ * fw_io_get_bar_info() - Get switch fabric BAR info
+ * @param ctx: FWIO context
+ * @param query_type: 1 (INTER_SERVER) or 2 (INTRA_SERVER)
+ * @param entries: BAR entries in response
+ * @param count: Number of valid entries in response
+ */
+int fw_io_get_bar_info(struct fw_io_ctx *ctx, u8 query_type, struct fw_io_bar_entry *entries, u8 *count);
 
 #endif

@@ -1013,6 +1013,7 @@ static void nmetric_start_new_session(struct neuron_device *nd, u64 *curr_metric
 static void nmetric_sample_high_freq(struct neuron_device *nd)
 {
 	npower_sample_utilization(nd);
+	nsysfsmetric_health_status_tick(nd);
 }
 
 static void nmetric_aggregate_and_post_tick(struct neuron_device *nd, struct nmetric_versions *component_versions, u64 *curr_feature_bitmap, u64 *freed_feature_bitmap, u64 *const_u64_metrics, u64 *freed_const_u64_metrics, u8 tick)
@@ -1059,8 +1060,6 @@ static int nmetric_thread_fn(void *arg)
 	u64 last_metric_post_time;
 	u64 start_jiffies = jiffies;
 	u64 current_slow_tick;
-	u64 last_health_tick_jiffies = jiffies;
-	const u64 health_tick_interval_jiffies = msecs_to_jiffies(60 * 1000); // health_status cache refresh cadence
 	u8 tick_budget = 0; // how many ticks can be posted in a certain iteration of the loop
 
 	// initialize all aggregation buffers
@@ -1097,12 +1096,6 @@ static int nmetric_thread_fn(void *arg)
 
 		// There are some metrics that we sample at a relatively higher frequency.  Do that here.
 		nmetric_sample_high_freq(nd);
-
-		// Refresh health_status cached sysfs values 
-		if ((jiffies - last_health_tick_jiffies) >= health_tick_interval_jiffies) {
-			nsysfsmetric_health_status_tick(nd);
-			last_health_tick_jiffies = jiffies;
-		}
 
 		// For the slower metrics, we want to log once every post_delay_in_jiffies jiffies.
 		// We track this by keeping track of the number of intervals since this thread started

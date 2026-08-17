@@ -40,10 +40,6 @@ int force_die_flip = 0;
 module_param(force_die_flip, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(force_die_flip, "Force Neuron Core Mapping APIs to give back DIE flip mappings");
 
-bool enable_sysfs_health_status_nodes = true;
-module_param(enable_sysfs_health_status_nodes, bool, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
-MODULE_PARM_DESC(enable_sysfs_health_status_nodes, "Enable sysfs device health_status nodes");
-
 // TOP SP addresses are sparse on chip adjust to accommodate the table macro
 //
 #define V3_TOP_SP_GRP1_BASE V3_TOP_SP_0_BASE
@@ -431,6 +427,7 @@ static int nr_post_reset_config_v3(struct neuron_device *nd, bool reset_successf
 		if (nd->supports_hbm_7200 == -1) {
 			ndhal->ndhal_perf.perf_update_hbm_7200_supported(nd);
 		}
+		ndhal->ndhal_fw_io.fw_io_cache_bar_info(nd);
 	} else {
 		nd->supports_hbm_7200 = 0;
 	}
@@ -610,6 +607,11 @@ static int nc_get_event_addr_v3(struct neuron_device *nd, u8 nc_id, u16 event_in
 static u8 nnq_get_nqid_v3(struct neuron_device *nd, u8 nc_id, u8 index, u32 nq_type)
 {
 	return (nq_type * V3_MAX_NQ_QUEUES) + index;
+}
+
+static u8 nnq_get_nq_queue_count_v3(void)
+{
+	return V3_MAX_NQ_QUEUES;
 }
 
 /**
@@ -1799,6 +1801,28 @@ static void perf_update_hbm_7200_supported_v3(struct neuron_device *nd)
 	nd->supports_hbm_7200 = supports_hbm_7200;
 }
 
+static void fw_io_cache_bar_info_v3(struct neuron_device *nd)
+{
+	int bar_idx;
+	int max_bars = 0;
+
+	if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_MAX) {
+		max_bars = 2;
+	} else if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_PDS) {
+		max_bars = 1;
+	}
+
+	for (bar_idx = 0; bar_idx < max_bars; bar_idx++) {
+		if (nd->bar_info[bar_idx].cached) {
+			continue;
+		}
+		fw_io_get_bar_info(nd->fw_io_ctx, bar_idx + 1,
+				      nd->bar_info[bar_idx].bars,
+				      &nd->bar_info[bar_idx].count);
+		nd->bar_info[bar_idx].cached = true;
+	}
+}
+
 /**
  * npe_class_node_id_show_data() - return sysfs class node_id
  *
@@ -1953,6 +1977,7 @@ int ndhal_register_funcs_v3(void) {
 	ndhal->ndhal_nc.nc_get_event_addr = nc_get_event_addr_v3;
 	ndhal->ndhal_nq.nnq_get_nqid = nnq_get_nqid_v3;
 	ndhal->ndhal_nq.nnq_set_hwaddr = nnq_set_hwaddr_v3;
+	ndhal->ndhal_nq.nnq_get_nq_queue_count = nnq_get_nq_queue_count_v3;
 	ndhal->ndhal_mpset.mp_min_alloc_size = (mempool_min_alloc_size < 1024) ? 1024 : mempool_min_alloc_size;
 	ndhal->ndhal_mpset.small_pool_supported = true;
 	ndhal->ndhal_mpset.mpset_set_dram_and_mpset_info = mpset_set_dram_and_mpset_info_v3;
@@ -1970,6 +1995,7 @@ int ndhal_register_funcs_v3(void) {
 	ndhal->ndhal_fw_io.fw_io_read_csr_array = fw_io_read_csr_array_v3;
 	ndhal->ndhal_fw_io.fw_io_execute_request = fw_io_execute_request_v3;
 	ndhal->ndhal_fw_io.fw_io_post_metric = fw_io_post_metric_v3;
+	ndhal->ndhal_fw_io.fw_io_cache_bar_info = fw_io_cache_bar_info_v3;
 	ndhal->ndhal_mmap.dm_mmap_special = dm_mmap_special_v3;
 	ndhal->ndhal_mmap.mmap_get_bar4_offset = mmap_get_bar4_offset_v3;
 	ndhal->ndhal_sysfs_metrics.root_info_node_attrs_info_tbl_cnt = root_info_node_attrs_info_tbl_cnt_v3;
@@ -1977,7 +2003,7 @@ int ndhal_register_funcs_v3(void) {
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_ecc_nodes = nsysfsmetric_add_ecc_nodes_v3;
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_get_hbm_error_count = nsysfsmetric_get_hbm_error_count_v3;
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_tensor_engine_node = nsysfsmetric_add_tensor_engine_node_v3;
-	ndhal->ndhal_sysfs_metrics.health_status_enabled = enable_sysfs_health_status_nodes;
+	ndhal->ndhal_sysfs_metrics.health_status_enabled = true;
 	ndhal->ndhal_pci.axi_bar = BAR_UNUSED;
 	ndhal->ndhal_pci.apb_bar = 0;
 	ndhal->ndhal_pci.dram_bar = 4;

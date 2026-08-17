@@ -265,6 +265,24 @@ int ndma_zerocopy_submit(struct neuron_device *nd,
 						void *context);
 
 /**
+ * ndma_zerocopy_submit_completed() - Enqueue completed work for ordered async CQE.
+ *
+ * Used only for async BAR4 writes and temporary fake-async D2D copy, where the work
+ * has already completed before we enqueue a dummy context.
+ *
+ * @nd: Neuron device.
+ * @nc_id: NeuronCore id that owns the H2D queue.
+ * @qid: H2D queue id.
+ * @sequence_num: Async sequence number returned to userspace.
+ * @compl_ret: Completion result to report in the CQE.
+ * @context: Userspace completion context to copy into the CQE.
+ *
+ * Return: 0 if queued, negative errno otherwise.
+ */
+int ndma_zerocopy_submit_completed(struct neuron_device *nd, u32 nc_id, int qid,
+				   u64 sequence_num, s64 compl_ret, void *context);
+
+/**
  * Pre-pinned host memory support
  *
  * Allows userspace to pin host memory once and reuse it for multiple

@@ -145,7 +145,9 @@ static const nsysfsmetric_attr_info_t arch_info_attrs_info_tbl[] = {
 static const int arch_info_attrs_info_tbl_cnt = sizeof(arch_info_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
 
 static const nsysfsmetric_attr_info_t ecc_attrs_info_tbl[] = {
+    ATTR_INFO("sram_ecc_corrected", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_SRAM_CORRECTED), OTHER),
     ATTR_INFO("sram_ecc_uncorrected", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_SRAM_UNCORRECTED), OTHER),
+    ATTR_INFO("mem_ecc_corrected",  NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_HBM_CORRECTED),  OTHER),
     ATTR_INFO("mem_ecc_uncorrected",  NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_HBM_UNCORRECTED),  OTHER),
     ATTR_INFO("mem_ecc_repairable_uncorrected",  NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_REPAIRABLE_HBM_UNCORRECTED),  OTHER),
 };
@@ -158,20 +160,34 @@ struct health_status_reg_map {
 };
 
 static const struct health_status_reg_map health_status_reg_tbl[] = {
-    { HEALTH_STATUS_SLOT_SRAM_ECC,         FW_IO_REG_SRAM_ECC_OFFSET,           true },
-    { HEALTH_STATUS_SLOT_HBM0_ECC,         FW_IO_REG_HBM0_ECC_OFFSET,           true },
-    { HEALTH_STATUS_SLOT_HBM1_ECC,         FW_IO_REG_HBM1_ECC_OFFSET,           true },
-    { HEALTH_STATUS_SLOT_HBM2_ECC,         FW_IO_REG_HBM2_ECC_OFFSET,           true },
-    { HEALTH_STATUS_SLOT_HBM3_ECC,         FW_IO_REG_HBM3_ECC_OFFSET,           true },
-    { HEALTH_STATUS_SLOT_HBM_REPAIR_STATE, FW_IO_REG_HBM_REPAIR_STATE_OFFSET,   true },
-    { HEALTH_STATUS_SLOT_FW_API_VERSION,   FW_IO_REG_API_VERSION_OFFSET,        false },
+    { HEALTH_STATUS_SLOT_HEALTH_STATUS_CHECK, FW_IO_REG_HEALTH_CHECK_STATUS_OFFSET, true },
+    { HEALTH_STATUS_SLOT_HEALTH_STATUS_SEQ,   FW_IO_REG_HEALTH_CHECK_SEQ_OFFSET,    false },
 };
 static const int health_status_reg_tbl_cnt = sizeof(health_status_reg_tbl) / sizeof(health_status_reg_tbl[0]);
 
+struct healthcheck_status_field {
+    u8 shift;
+    u8 mask;
+    const char *name;
+};
+
+static const struct healthcheck_status_field healthcheck_status_fields[] = {
+    { 3,  0x1, "hbm" },
+    { 4,  0x1, "firmware_service_api" },
+    { 5,  0x1, "firmware_service_processor" },
+    { 6,  0x1, "sram" },
+    { 7,  0x1, "link_intraserver" },
+    { 8,  0x1, "link_host" },
+    { 9,  0x1, "link_efa" },
+    { 10, 0x1, "link_interserver" },
+    { 11, 0x1, "link_switch" },
+    { 12, 0x1, "axi_fabric" },
+};
+static const int healthcheck_status_fields_cnt = sizeof(healthcheck_status_fields) / sizeof(healthcheck_status_fields[0]);
+
 static const nsysfsmetric_attr_info_t health_status_attrs_info_tbl[] = {
-    ATTR_INFO("hbm_ecc_err_count",             NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_HBM_UE_COUNT),             CACHED_VALUES),
-    ATTR_INFO("repairable_hbm_ecc_err_count",  NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_REPAIRABLE_HBM_UE_COUNT),  CACHED_VALUES),
-    ATTR_INFO("sram_ecc_err_count",            NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_SRAM_UE_COUNT),            CACHED_VALUES),
+    ATTR_INFO("unhealthy_components",          NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_OVERALL_HEALTH),           CACHED_VALUES),
+    ATTR_INFO("healthcheck_heartbeat",         NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_HEARTBEAT),                CACHED_VALUES),
     ATTR_INFO("hw_error_event",                NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_HW_ERROR_EVENT),           CACHED_VALUES),
 };
 static const int health_status_attrs_info_tbl_cnt = sizeof(health_status_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
@@ -284,13 +300,36 @@ static void nsysfsmetric_get_neuron_architecture(struct nsysfsmetric_metrics *sy
     snprintf(arch, NEURON_ARCH_MAX_LEN, "%s%s", arch_prefix, arch_suffix);
 }
 
+static bool nsysfsmetric_is_nds_metric(int metric_id)
+{
+    return metric_id >= NDS_NC_COUNTER_ID_TO_SYSFS_METRIC_ID(0) && metric_id < (NDS_NC_COUNTER_ID_TO_SYSFS_METRIC_ID(0) + NDS_COUNTER_COUNT);
+}
+
+static u64 nsysfsmetric_sum_nds_counter(struct neuron_device *nd, int nc_id, int metric_id)
+{
+    struct neuron_datastore *nds = &nd->datastore;
+    int ds_id = SYSFS_METRIC_ID_TO_NDS_NC_COUNTER_ID(metric_id);
+    u64 val = 0;
+    int i = 0;
+
+    for (i = 0; i < NEURON_MAX_DATASTORE_ENTRIES_PER_DEVICE; i++) {
+        struct mem_chunk *mc = nds->entries[i].mc;
+        if (!mc || !mc->va)
+            continue;
+        val += get_neuroncore_counter_value(&nds->entries[i], nc_id, ds_id);
+    }
+
+    // One MAC = two floating point operations (multiply + add)
+    if (ds_id == NDS_NC_COUNTER_MAC_COUNT)
+        val *= 2;
+
+    return val;
+}
 
 static ssize_t nsysfsmetric_show_nrt_total_metrics(struct nsysfsmetric_metrics *sysfs_metrics,
                                                 struct metric_attribute *attr,
                                                 char *buf)
 {
-    ssize_t len = 0;
-
     if (attr->metric_id < 0 || attr->metric_id >= MAX_METRIC_ID || attr->nc_id >= MAX_NC_PER_DEVICE) {
         pr_err("invalid metric_id %d or nc_id %d of attr_type TOTAL\n", attr->metric_id, attr->nc_id);
         return 0;
@@ -298,14 +337,17 @@ static ssize_t nsysfsmetric_show_nrt_total_metrics(struct nsysfsmetric_metrics *
 
     u64 val = 0;
 
-    if (attr->nc_id == -1) {
-        val = sysfs_metrics->nrt_nd_metrics[attr->metric_id].total;
+    if (nsysfsmetric_is_nds_metric(attr->metric_id) && attr->nc_id >= 0) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        val = nsysfsmetric_sum_nds_counter(nd, attr->nc_id, attr->metric_id);
     } else {
-        val = sysfs_metrics->nrt_metrics[attr->metric_id][attr->nc_id].total;
+        if (attr->nc_id == -1)
+            val = sysfs_metrics->nrt_nd_metrics[attr->metric_id].total;
+        else
+            val = sysfs_metrics->nrt_metrics[attr->metric_id][attr->nc_id].total;
     }
-    len = nsysfsmetric_sysfs_emit(buf, "%llu\n", val);
 
-    return len;
+    return nsysfsmetric_sysfs_emit(buf, "%llu\n", val);
 }
 
 static ssize_t nsysfsmetric_show_nrt_present_metrics(struct nsysfsmetric_metrics *sysfs_metrics,
@@ -317,6 +359,13 @@ static ssize_t nsysfsmetric_show_nrt_present_metrics(struct nsysfsmetric_metrics
     if (attr->metric_id < 0 || attr->metric_id >= MAX_METRIC_ID || attr->nc_id >= MAX_NC_PER_DEVICE) {
         pr_err("invalid metric_id %d or nc_id %d of attr_type PRESENT\n", attr->metric_id, attr->nc_id);
         return 0;
+    }
+
+    // Return the same value as total for now.
+    // TODO: deprecate "present" for NDS metrics in a future release.
+    if (nsysfsmetric_is_nds_metric(attr->metric_id) && attr->nc_id >= 0) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        return nsysfsmetric_sysfs_emit(buf, "%llu\n", nsysfsmetric_sum_nds_counter(nd, attr->nc_id, attr->metric_id));
     }
 
     u64 val = 0;
@@ -370,7 +419,7 @@ static ssize_t nsysfsmetric_show_nrt_other_metrics(struct nsysfsmetric_metrics *
         else
             len = nsysfsmetric_sysfs_emit(buf, "-1\n");
     } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_SRAM_UNCORRECTED)) {
-        struct neuron_device *nd = container_of(sysfs_metrics, struct neuron_device, sysfs_metrics);
+        struct neuron_device *nd = sysfs_metrics->nd;
         uint64_t ecc_offset = FW_IO_REG_SRAM_ECC_OFFSET;
         uint32_t ecc_err_count = 0;
         int ret = fw_io_ecc_read(nd->npdev.bar0, ecc_offset, &ecc_err_count);
@@ -381,15 +430,39 @@ static ssize_t nsysfsmetric_show_nrt_other_metrics(struct nsysfsmetric_metrics *
             ecc_err_count = 0;
         }
         len = nsysfsmetric_sysfs_emit(buf, "%u\n", ecc_err_count & 0x0000ffff);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_SRAM_CORRECTED)) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        uint64_t ecc_offset = FW_IO_REG_SRAM_ECC_OFFSET;
+        uint32_t ecc_err_count = 0;
+        int ret = fw_io_ecc_read(nd->npdev.bar0, ecc_offset, &ecc_err_count);
+        if (ret) {
+            ecc_err_count = 0;
+            pr_err("sysfs failed to read ECC SRAM error from FWIO\n");
+        } else if (ecc_err_count == 0xdeadbeef) {
+            ecc_err_count = 0;
+        }
+        len = nsysfsmetric_sysfs_emit(buf, "%u\n", (ecc_err_count >> 16) & 0xffff);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_HBM_CORRECTED)) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        uint64_t ecc_offset = FW_IO_REG_HBM0_ECC_OFFSET; // reg 17 is for all HBMs now, earlier was only for HBM0
+        uint32_t ecc_err_count = 0;
+        int ret = fw_io_ecc_read(nd->npdev.bar0, ecc_offset, &ecc_err_count);
+        if (ret) {
+            ecc_err_count = 0;
+            pr_err("sysfs failed to read ECC HBM error from FWIO\n");
+        } else if (ecc_err_count == 0xdeadbeef) {
+            ecc_err_count = 0;
+        }
+        len = nsysfsmetric_sysfs_emit(buf, "%u\n", (ecc_err_count >> 16) & 0xffff);
     } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_HBM_UNCORRECTED)
         || attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_REPAIRABLE_HBM_UNCORRECTED)) {
-        struct neuron_device *nd = container_of(sysfs_metrics, struct neuron_device, sysfs_metrics);
+        struct neuron_device *nd = sysfs_metrics->nd;
         uint32_t err_count;
         bool get_repairable = (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_ECC_REPAIRABLE_HBM_UNCORRECTED));
         ndhal->ndhal_sysfs_metrics.nsysfsmetric_get_hbm_error_count(nd, get_repairable, &err_count);
         len = nsysfsmetric_sysfs_emit(buf, "%u\n", err_count);
     } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_SERIAL_NUMBER)) {
-        struct neuron_device *nd = container_of(sysfs_metrics, struct neuron_device, sysfs_metrics);
+        struct neuron_device *nd = sysfs_metrics->nd;
         uint64_t serial_number = 0;
         int ret = fw_io_serial_number_read(nd->npdev.bar0, &serial_number);
         if (ret
@@ -402,7 +475,7 @@ static ssize_t nsysfsmetric_show_nrt_other_metrics(struct nsysfsmetric_metrics *
             len = nsysfsmetric_sysfs_emit(buf, "%016llx\n", serial_number);
         }
 	} else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_POWER_UTILIZATION)) {
-		struct neuron_device *nd = container_of(sysfs_metrics, struct neuron_device, sysfs_metrics);
+		struct neuron_device *nd = sysfs_metrics->nd;
 
 		char buffer[256];
 		int ret = npower_format_stats(nd, buffer, 256);
@@ -411,7 +484,7 @@ static ssize_t nsysfsmetric_show_nrt_other_metrics(struct nsysfsmetric_metrics *
 		}
 		len = nsysfsmetric_sysfs_emit(buf, "%s\n", buffer);
 	} else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_POWER_UTILIZATION_RAW)) {
-		struct neuron_device *nd = container_of(sysfs_metrics, struct neuron_device, sysfs_metrics);
+		struct neuron_device *nd = sysfs_metrics->nd;
 
 		char buffer[256];
 		int ret = npower_format_raw(nd, buffer, sizeof(buffer));
@@ -420,7 +493,7 @@ static ssize_t nsysfsmetric_show_nrt_other_metrics(struct nsysfsmetric_metrics *
 		}
 		len = nsysfsmetric_sysfs_emit(buf, "%s", buffer);
 	} else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_PE_ARRAY_ACTIVITY)) {
-        struct neuron_device *nd = container_of(sysfs_metrics, struct neuron_device, sysfs_metrics);
+        struct neuron_device *nd = sysfs_metrics->nd;
 
         char buffer[256];
         int ret = ndhal->ndhal_tpb.pe_format_activity_stats(nd, attr->nc_id, buffer, sizeof(buffer));
@@ -442,31 +515,37 @@ static ssize_t nsysfsmetric_show_cached_values_metrics(struct nsysfsmetric_metri
     u32 value = 0;
 
     switch (attr->metric_id) {
-        case NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_SRAM_UE_COUNT):
-            value = READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_SRAM_ECC]);
-            return nsysfsmetric_sysfs_emit(buf, "%u\n", value & 0xffff); // Lower 16 bits
-        case NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_HBM_UE_COUNT):
-            // TODO: Use cached HEALTH_STATUS_SLOT_FW_API_VERSION
-            // For now, safe to assume api_version >= 6
-            value = 0;
-            value += (((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM0_ECC])) >> 12) & 0xf);
-            value += (((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM1_ECC])) >> 12) & 0xf);
-            value += (((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM2_ECC])) >> 12) & 0xf);
-            value += (((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM3_ECC])) >> 12) & 0xf);
-            if ((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM_REPAIR_STATE]) & 0x3) == 0x2)
-                value +=1;
+        case NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_OVERALL_HEALTH): {
+            char tmp[512];
+            int i, pos = 0;
+            u32 reg1;
 
-            return nsysfsmetric_sysfs_emit(buf, "%u\n", value);
-        case NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_REPAIRABLE_HBM_UE_COUNT):
-            value = 0;
-            value += ((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM0_ECC])) & 0xfff);
-            value += ((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM1_ECC])) & 0xfff);
-            value += ((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM2_ECC])) & 0xfff);
-            value += ((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM3_ECC])) & 0xfff);
-            if ((READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HBM_REPAIR_STATE]) & 0x3) == 0x1)
-                value +=1;
+            if (READ_ONCE(sysfs_metrics->health_check_regs_read_failed))
+                return nsysfsmetric_sysfs_emit(buf, "device_unreachable\n");
 
-            return nsysfsmetric_sysfs_emit(buf, "%u\n", value);
+            reg1 = READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HEALTH_STATUS_CHECK]);
+            for (i = 0; i < healthcheck_status_fields_cnt; i++) {
+                if ((reg1 >> healthcheck_status_fields[i].shift) & healthcheck_status_fields[i].mask) {
+                    if (pos) {
+                        pos += scnprintf(tmp + pos, sizeof(tmp) - pos, ",");
+                    }
+                    pos += scnprintf(tmp + pos, sizeof(tmp) - pos, "%s", healthcheck_status_fields[i].name);
+                }
+            }
+
+            if (pos == 0)
+                return nsysfsmetric_sysfs_emit(buf, "\n");
+
+            return nsysfsmetric_sysfs_emit(buf, "%s\n", tmp);
+        }
+
+        case NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_HEARTBEAT):
+            if (READ_ONCE(sysfs_metrics->health_check_regs_read_failed))
+                return nsysfsmetric_sysfs_emit(buf, "device_unreachable\n");
+
+            value = READ_ONCE(sysfs_metrics->cached_health_regs[HEALTH_STATUS_SLOT_HEALTH_STATUS_SEQ]);
+            return nsysfsmetric_sysfs_emit(buf, "%u\n", _REG_HEALTHCHECK_HEARTBEAT(value));
+
         case NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_HEALTH_STATUS_HW_ERROR_EVENT):
             return nsysfsmetric_sysfs_emit(buf, "%u\n", READ_ONCE(sysfs_metrics->hw_error_event_count));
         default:
@@ -475,19 +554,50 @@ static ssize_t nsysfsmetric_show_cached_values_metrics(struct nsysfsmetric_metri
     }
 }
 
+static void clear_neuroncore_counter_value(struct neuron_datastore_entry *entry, int nc_index,
+                                           int counter_index)
+{
+    void *ds_base_ptr = entry->mc->va;
+
+    if (nc_index < NDS_MAX_NEURONCORE_COUNT) {
+        if (counter_index < NDS_NC_COUNTER_COUNT)
+            WRITE_ONCE(NDS_NEURONCORE_COUNTERS(ds_base_ptr, nc_index)[counter_index], 0);
+        else
+            WRITE_ONCE(NDS_EXT_NEURONCORE_COUNTERS(ds_base_ptr, nc_index)[counter_index - NDS_NC_COUNTER_COUNT], 0);
+    } else {
+        nc_index -= NDS_MAX_NEURONCORE_COUNT;
+        if (nc_index < NDS_EXT_MAX_NEURONCORE_COUNT && counter_index < NDS_TOTAL_NC_COUNTER_COUNT)
+            WRITE_ONCE(NDS_EXT_NEURONCORE_NC_DATA(ds_base_ptr, nc_index)[counter_index], 0);
+    }
+}
+
 static ssize_t nsysfsmetric_set_nrt_total_metrics(struct nsysfsmetric_metrics *sysfs_metrics,
                                                     struct metric_attribute *attr,
                                                     const char *buf, size_t size)
 {
+    struct neuron_device *nd = sysfs_metrics->nd;
+    int i = 0;
+
     if (attr->metric_id < 0 || attr->metric_id >= MAX_METRIC_ID || attr->nc_id >= MAX_NC_PER_DEVICE) {
         pr_err("invalid metric_id %d or nc_id %d of attr_type TOTAL\n", attr->metric_id, attr->nc_id);
         return 0;
     }
-    if (attr->nc_id == -1) {
-        sysfs_metrics->nrt_nd_metrics[attr->metric_id].total = 0;
+
+    if (nsysfsmetric_is_nds_metric(attr->metric_id) && attr->nc_id >= 0) {
+        int ds_id = SYSFS_METRIC_ID_TO_NDS_NC_COUNTER_ID(attr->metric_id);
+        for (i = 0; i < NEURON_MAX_DATASTORE_ENTRIES_PER_DEVICE; i++) {
+            struct mem_chunk *mc = nd->datastore.entries[i].mc;
+            if (!mc || !mc->va)
+                continue;
+            clear_neuroncore_counter_value(&nd->datastore.entries[i], attr->nc_id, ds_id);
+        }
     } else {
-        sysfs_metrics->nrt_metrics[attr->metric_id][attr->nc_id].total = 0;
+        if (attr->nc_id == -1)
+            sysfs_metrics->nrt_nd_metrics[attr->metric_id].total = 0;
+        else
+            sysfs_metrics->nrt_metrics[attr->metric_id][attr->nc_id].total = 0;
     }
+
     return size;
 }
 
@@ -965,7 +1075,7 @@ int nsysfsmetric_register(struct neuron_device *nd, struct kobject *neuron_devic
 {
     int ret;
     struct nsysfsmetric_metrics *metrics = &nd->sysfs_metrics;
-
+    metrics->nd = nd;
     ret = nsysfsmetric_init_and_add_root_node(metrics, neuron_device_kobj);
     if (ret) {
         pr_err("cannot init the root node for neuron_device %d\n", nd->device_index);
@@ -1098,15 +1208,21 @@ void nsysfsmetric_health_status_tick(struct neuron_device *nd)
     struct nsysfsmetric_metrics *metrics = &nd->sysfs_metrics;
     int i;
     bool changed = false;
+    bool reg_read_failed = false;
 
     if (!ndhal->ndhal_sysfs_metrics.health_status_enabled)
         return;
 
     for (i = 0; i < health_status_reg_tbl_cnt; i++) {
         u32 val;
-        int ret = fw_io_misc_ram_reg_read(nd->npdev.bar0, health_status_reg_tbl[i].offset, &val);
-        if (ret)
-            continue; // TODO: figure out how to communicate to sysfs readers that read failed
+        int ret = fw_io_misc_ram_reg_read(nd->npdev.bar0, health_status_reg_tbl[i].offset, &val, false);
+        if (ret) {
+            reg_read_failed = true;
+            if (!READ_ONCE(metrics->health_check_regs_read_failed)) {
+                changed = true;
+            }
+            continue;
+        }
 
         if (val != READ_ONCE(metrics->cached_health_regs[health_status_reg_tbl[i].slot])) {
             WRITE_ONCE(metrics->cached_health_regs[health_status_reg_tbl[i].slot], val);
@@ -1115,6 +1231,12 @@ void nsysfsmetric_health_status_tick(struct neuron_device *nd)
             }
         }
     }
+
+    if (READ_ONCE(metrics->health_check_regs_read_failed) && !reg_read_failed) {
+        changed = true;
+    }
+
+    WRITE_ONCE(metrics->health_check_regs_read_failed, reg_read_failed);
 
     if (changed && metrics->health_status_node) {
         // This function is the only writer, don't need atomic update, just volatile (READ_ONCE/WRITE_ONCE)
@@ -1260,39 +1382,4 @@ void nsysfsmetric_inc_reset_fail_count(struct neuron_device *nd)
 void nsysfsmetric_inc_reset_req_count(struct neuron_device *nd, int nc_id)
 {
     nsysfsmetric_inc_counter(nd, NON_NDS_METRIC, NON_NDS_COUNTER_RESET_REQ_COUNT, nc_id, 1, true);
-}
-
-void nsysfsmetric_nds_aggregate(struct neuron_device *nd, struct neuron_datastore_entry *entry)
-{
-    int i;
-    int nc_id;
-    int ds_id;
-    int metric_id;
-    u64 delta;
-    void *ds_base_ptr = entry->mc->va;
-
-    // read dynamic sysfs metric bitmap from nds
-    ds_id = NDS_ND_COUNTER_DYNAMIC_SYSFS_METRIC_BITMAP;
-    if (NDS_ND_COUNTERS(ds_base_ptr)[ds_id] > 0) {
-        nsysfsmetric_init_and_add_dynamic_counter_nodes(nd, NDS_ND_COUNTERS(ds_base_ptr)[ds_id]);
-    }
-
-    for (nc_id = 0; nc_id < ndhal->ndhal_address_map.nc_per_device; nc_id++) {
-        if (((1 << nc_id) & ndhal->ndhal_address_map.dev_nc_map) == 0) {
-            continue;
-        }
-        // read status counters from nds
-        for (i = 0; i < status_counter_nodes_info_tbl_cnt; i++) {
-            metric_id = status_counter_nodes_info_tbl[i].metric_id;
-            ds_id = SYSFS_METRIC_ID_TO_NDS_NC_COUNTER_ID(metric_id);
-            delta = get_neuroncore_counter_value(entry, nc_id, ds_id);
-            nsysfsmetric_inc_counter(nd, NDS_NC_METRIC, ds_id, nc_id, delta, true);
-        }
-
-        // read the custom sysfs metrics from nds.
-        nsysfsmetric_inc_counter(nd, NDS_NC_METRIC, NDS_NC_COUNTER_MODEL_LOAD_COUNT, nc_id, get_neuroncore_counter_value(entry, nc_id, NDS_NC_COUNTER_MODEL_LOAD_COUNT), true);
-        nsysfsmetric_inc_counter(nd, NDS_NC_METRIC, NDS_NC_COUNTER_INFERENCE_COUNT, nc_id, get_neuroncore_counter_value(entry, nc_id, NDS_NC_COUNTER_INFERENCE_COUNT), true);
-        nsysfsmetric_inc_counter(nd, NDS_NC_METRIC, NDS_NC_COUNTER_MAC_COUNT, nc_id, 2 * get_neuroncore_counter_value(entry, nc_id, NDS_NC_COUNTER_MAC_COUNT), true);  // one MAC has two floating point operations (multiply and add)
-        nsysfsmetric_inc_counter(nd, NDS_NC_METRIC, NDS_NC_COUNTER_TIME_IN_USE, nc_id, get_neuroncore_counter_value(entry, nc_id, NDS_NC_COUNTER_TIME_IN_USE), true);
-    }
 }

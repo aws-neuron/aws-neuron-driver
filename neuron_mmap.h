@@ -19,10 +19,20 @@
 #endif
 
 /*
- * Linux 6.10 removed get_unmapped_area from mm_struct and replaced it
- * with the standalone mm_get_unmapped_area() function.
+ * mm_get_unmapped_area() signature history:
+ *   < 6.10: no standalone function; call current->mm->get_unmapped_area()
+ *           directly (5 args).
+ *   6.10:   introduced as
+ *           mm_get_unmapped_area(struct mm_struct *mm, struct file *filp,
+ *                                addr, len, pgoff, flags) -- 6 args.
+ *   6.19:   the leading mm parameter was dropped, reverting to
+ *           mm_get_unmapped_area(struct file *filp, addr, len, pgoff, flags)
+ *           -- 5 args. (Present in v6.18, gone in v6.19.)
  */
-#if (!defined(RHEL_RELEASE_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))) || (defined(RHEL_RELEASE_CODE) && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 5)))
+#if (!defined(RHEL_RELEASE_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)))
+#define nmmap_kern_get_unmapped_area(filep, addr, len, pgoff, flags) \
+	mm_get_unmapped_area(filep, addr, len, pgoff, flags)
+#elif (!defined(RHEL_RELEASE_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))) || (defined(RHEL_RELEASE_CODE) && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 5)))
 #define nmmap_kern_get_unmapped_area(filep, addr, len, pgoff, flags) \
 	mm_get_unmapped_area(current->mm, filep, addr, len, pgoff, flags)
 #else

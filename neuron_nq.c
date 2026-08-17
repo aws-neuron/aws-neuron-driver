@@ -43,7 +43,7 @@ static int nnq_halt(struct neuron_device *nd, u8 nc_id, u8 eng_index, u32 nq_typ
 	}
 
 	ndhal->ndhal_nq.nnq_set_hwaddr(nd, nc_id, eng_index, nq_type, 0, 0);
-	
+
 	return 0;
 }
 
@@ -157,8 +157,9 @@ void nnq_destroy_nc(struct neuron_device *nd, u8 nc_id)
 	u8 eng_index;
 	u8 nq_type;
 	u8 ts_id;
+	u8 nq_queue_count = ndhal->ndhal_nq.nnq_get_nq_queue_count();
 
-	for (eng_index = 0; eng_index < MAX_NQ_ENGINE; eng_index++) {
+	for (eng_index = 0; eng_index < nq_queue_count; eng_index++) {
 		for (nq_type = 0; nq_type < MAX_NQ_TYPE; nq_type++) {
 			nnq_halt(nd, nc_id, eng_index, nq_type);
 		}
@@ -167,7 +168,7 @@ void nnq_destroy_nc(struct neuron_device *nd, u8 nc_id)
 	// wait for halted notific queues to drain
 	msleep(1);
 
-	for (eng_index = 0; eng_index < MAX_NQ_ENGINE; eng_index++) {
+	for (eng_index = 0; eng_index < nq_queue_count; eng_index++) {
 		for (nq_type = 0; nq_type < MAX_NQ_TYPE; nq_type++) {
 			nnq_destroy(nd, nc_id, eng_index, nq_type);
 		}

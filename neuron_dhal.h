@@ -78,6 +78,7 @@ struct ndhal_nc {
 struct ndhal_nq {
    u8 (*nnq_get_nqid) (struct neuron_device *nd, u8 nc_id, u8 index, u32 nq_type);
    void (*nnq_set_hwaddr) (struct neuron_device *nd, u8 nc_id, u8 index, u32 nq_type, u32 size, u64 queue_pa);
+   u8 (*nnq_get_nq_queue_count) (void);
 };
 
 struct ndhal_mpset {
@@ -106,6 +107,7 @@ struct ndhal_fw_io {
     int (*fw_io_read_csr_array) (void **addrs, u32 *values, u32 num_csrs, bool operational);
     int (*fw_io_execute_request) (struct fw_io_ctx *ctx, u8 command_id, const u8 *req, u32 req_size, u8 *resp, u32 resp_size);
     int (*fw_io_post_metric) (struct fw_io_ctx *ctx, u8 *data, u32 size);
+    void (*fw_io_cache_bar_info) (struct neuron_device *nd);
 };
 
 struct ndhal_mmap {

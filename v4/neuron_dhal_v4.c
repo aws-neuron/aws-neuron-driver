@@ -13,6 +13,7 @@
 #include "../neuron_reset.h"
 #include "../neuron_arch.h"
 #include "../neuron_cdev.h"
+#include "../neuron_dma.h"
 #include "../neuron_pci.h"
 #include "../v3/neuron_pelect.h"
 
@@ -150,11 +151,14 @@ static int ndhal_register_funcs_trn3(void) {
 static const struct neuron_platform_lookup v4_platform_map[] = {
 	{"trn3e.24xlarge",      NEURON_PLATFORM_TYPE_MAX},
 	{"trn3e-dev0.24xlarge", NEURON_PLATFORM_TYPE_MAX},
-	{"trn3.48xlarge",      NEURON_PLATFORM_TYPE_PDS},
-	{"trn3-dev0.48xlarge", NEURON_PLATFORM_TYPE_PDS},
-	{"trn3-dev1.48xlarge", NEURON_PLATFORM_TYPE_PDS},
-	{"trn3p.48xlarge",     NEURON_PLATFORM_TYPE_ULTRASERVER},
-	{NULL,                 NEURON_PLATFORM_TYPE_INVALID},
+	{"trn3.48xlarge",       NEURON_PLATFORM_TYPE_PDS},
+	{"trn3-dev0.48xlarge",  NEURON_PLATFORM_TYPE_PDS},
+	{"trn3-dev1.48xlarge",  NEURON_PLATFORM_TYPE_PDS},
+	{"trn3s-es.48xlarge",   NEURON_PLATFORM_TYPE_PDS},
+	{"trn3sn.48xlarge",     NEURON_PLATFORM_TYPE_PDS},
+	{"trn3sn-es.48xlarge",  NEURON_PLATFORM_TYPE_PDS},
+	{"trn3p.48xlarge",      NEURON_PLATFORM_TYPE_ULTRASERVER},
+	{NULL,                  NEURON_PLATFORM_TYPE_INVALID},
 };
 
 static enum neuron_platform_type ndhal_platform_type_v4(void)
@@ -171,12 +175,22 @@ static enum neuron_platform_type ndhal_platform_type_v4(void)
 
 static bool ndhal_instance_type_3xl(void)
 {
+	static const char *const trn3_3xl_instance_names[] = {
+		"trn3pd98.3xlarge",
+		"trn3s-es.3xlarge",
+		"trn3sn.3xlarge",
+		"trn3sn-es.3xlarge",
+	};
 	static bool instance_type_is_3xl = false;
-#define NEURON_TRN3PD98_3XL_INSTANCE_NAME "trn3pd98.3xlarge"
 	char buf[128];
+	int i;
+
 	if (narch_get_instance_type_name(buf, sizeof(buf))) goto done;
-	if (strncmp(buf, NEURON_TRN3PD98_3XL_INSTANCE_NAME, sizeof(NEURON_TRN3PD98_3XL_INSTANCE_NAME)-1) == 0) {
-		instance_type_is_3xl = true;
+	for (i = 0; i < sizeof(trn3_3xl_instance_names) / sizeof(*trn3_3xl_instance_names); i++) {
+		if (strncmp(buf, trn3_3xl_instance_names[i], strlen(trn3_3xl_instance_names[i])) == 0) {
+			instance_type_is_3xl = true;
+			break;
+		}
 	}
 
 done:
@@ -184,29 +198,27 @@ done:
 }
 
 /**
- * ndmar_ctx_queue_bit_v4() - dummy ctx queue bitmap mapping for v4
- * @h2d_eng_id: ignored
- * @qid: ignored
+ * ndmar_ctx_queue_bit_v4() - map a V4 H2D queue to a dense bitmap index
+ * @h2d_eng_id: DMA engine id in the V4 H2D/D2H engine range (128 to 131)
+ * @qid: DMA queue id within the engine
  *
- * Async IO is not supported on v4 yet, so this hook is unused.
+ * Return bitmap bit index for the queue.
  */
 static int ndmar_ctx_queue_bit_v4(uint32_t h2d_eng_id, uint32_t qid)
 {
-	return 0;
+	return (h2d_eng_id - V4_D2H_0_IDX) * DMA_MAX_Q_V4 + qid;
 }
 
 /**
- * ndmar_ctx_queue_from_bit_v4() - dummy ctx queue bitmap reverse mapping for v4
- * @bit: ignored
- * @h2d_eng_id: returned DMA engine id placeholder
- * @qid: returned DMA queue id placeholder
- *
- * Async IO is not supported on v4 yet, so this hook is unused.
+ * ndmar_ctx_queue_from_bit_v4() - map a dense bitmap index back to a V4 H2D queue
+ * @bit: bitmap bit index
+ * @h2d_eng_id: returned DMA engine id
+ * @qid: returned DMA queue id
  */
 static void ndmar_ctx_queue_from_bit_v4(int bit, uint32_t *h2d_eng_id, uint32_t *qid)
 {
-	*h2d_eng_id = 0;
-	*qid = 0;
+	*h2d_eng_id = V4_D2H_0_IDX + (bit / DMA_MAX_Q_V4);
+	*qid = bit % DMA_MAX_Q_V4;
 }
 
 
@@ -495,6 +507,7 @@ int ndhal_register_funcs_v4(void) {
 	ndhal->ndhal_ndmar.ndmar_ctx_queue_from_bit = ndmar_ctx_queue_from_bit_v4;
 	ndhal->ndhal_cdev.ncdev_mem_regions = ncdev_mem_regions_v4;
 	ndhal->ndhal_perf.perf_update_hbm_7200_supported = perf_update_hbm_7200_supported_v4;
+	ndhal->ndhal_sysfs_metrics.health_status_enabled = true;
 
 	if (narch_is_emu()) {
 		// Temporarily disable resets on emulation until support is ready

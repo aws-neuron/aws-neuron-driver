@@ -145,11 +145,45 @@ static void neuron_ds_free_entry(struct neuron_datastore_entry *entry)
 
 static u64 ds_entry_clear_counter = 1;
 
-static void neuron_ds_clear_entry(struct neuron_datastore_entry *entry)
+/**
+ * neuron_ds_clear_entry_data_per_process - Clear per-process data from an NDS entry while
+ * preserving NC counters for real-time sysfs metrics.
+ *
+ * Cleared (per-process, stale after exit):
+ *   - Header: signature/version (runtime re-initializes on next nds_open)
+ *   - ND counters: runtime version, framework version, agg_neff_id (per-process metadata)
+ *   - Objects: process info, model info, process ext info (per-process state)
+ *
+ * Preserved (cumulative, needed for real-time sysfs reads):
+ *   - Primary NC counters: inference_count, nc_time_in_use, flop_count, status counters
+ *   - Extended NC counters: hw_err_collectives, hbm_ue, etc.
+ *
+ * ND counters are cleared because they hold per-process metadata (runtime version,
+ * framework type) that becomes stale after exit. The next process overwrites them
+ * on nds_open. NC counters accumulate across processes and are summed by sysfs on read.
+ */
+static void neuron_ds_clear_entry_data_per_process(struct neuron_datastore_entry *entry)
 {
+	void *va = entry->mc->va;
+	int nc;
+
 	entry->pid = 0;
 	entry->clear_tick = __sync_fetch_and_add(&ds_entry_clear_counter, 1);
-	memset(entry->mc->va, 0, NEURON_DATASTORE_SIZE);
+
+	// Zero header
+	memset(va + NDS_HEADER_START, 0, NDS_HEADER_SIZE);
+	// Zero ND counters
+	memset(va + NDS_ND_COUNTERS_START, 0, NDS_ND_COUNTERS_SIZE);
+	// Zero objects section
+	memset(va + NDS_OBJECTS_START, 0, NDS_OBJECTS_SIZE);
+	
+	// Zero device mem-usage NC counters (not cumulative)
+	for (nc = 0; nc < NDS_MAX_NEURONCORE_COUNT; nc++) {
+		memset(&NDS_NEURONCORE_COUNTERS(va, nc)[NDS_NC_COUNTER_MEM_USAGE_CODE_DEVICE], 0, NDS_NC_MEM_USAGE_DEVICE_SIZE);
+	}
+	for (nc = 0; nc < NDS_EXT_MAX_NEURONCORE_COUNT; nc++) {
+		memset(&NDS_EXT_NEURONCORE_NC_DATA(va, nc)[NDS_NC_COUNTER_MEM_USAGE_CODE_DEVICE], 0, NDS_NC_MEM_USAGE_DEVICE_SIZE);
+	}
 }
 
 static void neuron_ds_release_entry(struct neuron_datastore *nds,
@@ -159,8 +193,7 @@ static void neuron_ds_release_entry(struct neuron_datastore *nds,
 	if (!current_pid_is_owner)
 		return;
 	nmetric_partial_aggregate(nds->parent, entry);
-	nsysfsmetric_nds_aggregate(nds->parent, entry);
-	neuron_ds_clear_entry(entry);
+	neuron_ds_clear_entry_data_per_process(entry);
 }
 
 void neuron_ds_release_pid(struct neuron_datastore *nds, pid_t pid)
@@ -193,7 +226,7 @@ void neuron_ds_destroy(struct neuron_datastore *nds)
 
 void neuron_ds_clear(struct neuron_datastore *nds)
 {
-	neuron_ds_for_each_entry(nds, neuron_ds_clear_entry);
+	neuron_ds_for_each_entry(nds, neuron_ds_clear_entry_data_per_process);
 }
 
 // This gets the value of an NC counter in the following 3 cases:
