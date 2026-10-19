@@ -20,13 +20,13 @@
 #include "neuron_dma.h"
 #include "neuron_test.h"
 
-MODULE_DESCRIPTION("Neuron Driver, built from SHA: 40a502a5d7e0f165b7e4d89588eb1da01c068e8e");
+MODULE_DESCRIPTION("Neuron Driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("2.30.2.0");
+MODULE_VERSION("2.31.7.0");
 MODULE_ALIAS("pci:v00001d0fd00007064sv*sd*bc*sc*i*");
 
-const char driver_version[] = "2.30.2.0";
-const char driver_revision[] = "40a502a5d7e0f165b7e4d89588eb1da01c068e8e";
+const char driver_version[] = "2.31.7.0";
+const char driver_revision[] = "63b8760cad44a0c5c428065e92595d88203b7f51";
 
 #ifdef CONFIG_FAULT_INJECTION
 
@@ -102,3 +102,4 @@ static void __exit neuron_module_exit(void)
 
 module_init(neuron_module_init);
 module_exit(neuron_module_exit);
+

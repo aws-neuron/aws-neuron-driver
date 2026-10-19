@@ -458,6 +458,91 @@ static void nnq_set_hwaddr_v2(struct neuron_device *nd, u8 nc_id, u8 index, u32 
 	notific_write_nq_f_size(apb_base, index, size);
 }
 
+static const uint32_t v2_nnq_h2d_id_to_eng_id[] = {V2_D2H_IDX, V2_H2D_IDX};
+
+static int nnq_get_nq_h2d_id_v2(uint32_t h2d_eng_id)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(v2_nnq_h2d_id_to_eng_id); i++) {
+		if (v2_nnq_h2d_id_to_eng_id[i] == h2d_eng_id)
+			return i;
+	}
+	return -1;
+}
+
+static uint32_t nnq_get_h2d_id_v2(int nq_h2d_id)
+{
+	return v2_nnq_h2d_id_to_eng_id[nq_h2d_id];
+}
+
+static int nnq_set_h2d_hwaddr_v2(struct neuron_device *nd, uint32_t h2d_eng_id, u32 size, u64 queue_pa)
+{
+	u64 sdma_base;
+	void *apb_base;
+	u32 low, high;
+
+	// H2D notification block lives in the same SDMA layout as per-NC SE engines,
+	// just hung off the H2D/D2H SDMA base instead of a SENG_x base.
+	if (h2d_eng_id == V2_H2D_IDX)
+		sdma_base = V2_APB_H2D_SDMA_BASE;
+	else if (h2d_eng_id == V2_D2H_IDX)
+		sdma_base = V2_APB_D2H_SDMA_BASE;
+	else
+		return -EINVAL;
+
+	apb_base = nd->npdev.bar0 + V2_PCIE_BAR0_APB_OFFSET + (sdma_base - V2_APB_BASE) +
+		   V2_APB_SENG_0_SDMA_0_NOTIFIC_RELBASE;
+
+	low = (u32)(queue_pa & 0xffffffff);
+	high = (u32)(queue_pa >> 32U);
+
+	notific_write_nq_base_addr_hi(apb_base, 0, high);
+	notific_write_nq_base_addr_lo(apb_base, 0, low);
+	notific_write_nq_f_size(apb_base, 0, size);
+	return 0;
+}
+
+static int nnq_set_nq_h2d_enable_v2(struct neuron_device *nd, uint32_t h2d_eng_id, u32 enable)
+{
+	u64 sdma_base;
+	void *apb_base;
+
+	// H2D notification block lives in the same SDMA layout as per-NC SE engines,
+	// just hung off the H2D/D2H SDMA base instead of a SENG_x base.
+	if (h2d_eng_id == V2_H2D_IDX)
+		sdma_base = V2_APB_H2D_SDMA_BASE;
+	else if (h2d_eng_id == V2_D2H_IDX)
+		sdma_base = V2_APB_D2H_SDMA_BASE;
+	else
+		return -EINVAL;
+
+	apb_base = nd->npdev.bar0 + V2_PCIE_BAR0_APB_OFFSET + (sdma_base - V2_APB_BASE) +
+		   V2_APB_SENG_0_SDMA_0_NOTIFIC_RELBASE;
+
+	notific_write_nq_enable(apb_base, enable);
+	return 0;
+}
+
+static int nnq_get_nq_h2d_enable_v2(struct neuron_device *nd, uint32_t h2d_eng_id, u32 *enable)
+{
+	u64 sdma_base;
+	void *apb_base;
+
+	// H2D notification block lives in the same SDMA layout as per-NC SE engines,
+	// just hung off the H2D/D2H SDMA base instead of a SENG_x base.
+	if (h2d_eng_id == V2_H2D_IDX)
+		sdma_base = V2_APB_H2D_SDMA_BASE;
+	else if (h2d_eng_id == V2_D2H_IDX)
+		sdma_base = V2_APB_D2H_SDMA_BASE;
+	else
+		return -EINVAL;
+
+	apb_base = nd->npdev.bar0 + V2_PCIE_BAR0_APB_OFFSET + (sdma_base - V2_APB_BASE) +
+		   V2_APB_SENG_0_SDMA_0_NOTIFIC_RELBASE;
+
+	*enable = notific_read_nq_enable(apb_base);
+	return 0;
+}
 
 /* Memory Pool Functions */
 /**
@@ -533,8 +618,8 @@ static void ndmar_ctx_queue_from_bit_v2(int bit, uint32_t *h2d_eng_id, uint32_t 
 	*qid = 0;
 }
 
-/** 
- * ndmar_is_h2t_def_q() - return true 
+/**
+ * ndmar_is_h2t_def_q() - return true
  *
  * @param nd: Neuron device which contains the DMA engine
  * @param eng_id: engine id
@@ -739,11 +824,6 @@ static int fw_io_read_csr_array_v2(void **ptrs, u32 *values, u32 num_csrs, bool 
 	if (num_csrs > FW_IO_MAX_READLESS_READ_REGISTER_COUNT)
 		return -EINVAL;
 
-	// Force virtual platforms onto the direct path
-	if (narch_is_qemu() || narch_is_emu()) {
-		fw_io_read_csr_array_direct(ptrs, values, num_csrs, operational);
-	}
-
 	return fw_io_read_csr_array_direct(ptrs, values, num_csrs, operational);
 }
 
@@ -805,37 +885,6 @@ static int mmap_get_bar4_offset_v2(u64 start_addr, u64 size, u64 *offset)
 
 /* Sysfs Metrics Functions */
 // sysfs root node's attrs and its child nodes' attrs
-static nsysfsmetric_attr_info_t root_info_node_attrs_info_tbl_v2[] = {
-    ATTR_INFO("notify_delay", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_NOTIFY_DELAY), OTHER),
-    ATTR_INFO("serial_number", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_SERIAL_NUMBER), OTHER),
-};
-static int root_info_node_attrs_info_tbl_cnt_v2 = sizeof(root_info_node_attrs_info_tbl_v2) / sizeof(nsysfsmetric_attr_info_t);
-
-/**
- * nsysfsmetric_add_ecc_nodes() - add neuron{0, 1, ...}/stats/hardware/{sram_ecc_uncorrected, mem_ecc_uncorrected} to sysfs directory
- * 
- * @param metrics: the sysfs metrics structure
- * @param stats_node: the sysfs node structure of the stats directory
- * @param ecc_attrs_info_tbl_cnt: number of the ecc attributes
- * @param attr_info_tbl: the ecc attributes as an array
- * @return int 0 on success; otherwise on failure
- * 
- * Note: ecc errors are only supported by sysfs for V2.
- */
-static int nsysfsmetric_add_ecc_nodes_v2(struct nsysfsmetric_metrics *metrics, 
-                                  struct nsysfsmetric_node *stats_node,
-                                  int ecc_attrs_info_tbl_cnt,
-                                  const nsysfsmetric_attr_info_t *ecc_attrs_info_tbl)
-{
-	struct nsysfsmetric_node *hardware_node = nsysfsmetric_init_and_add_one_node(metrics, stats_node, "hardware", false, -1, ecc_attrs_info_tbl_cnt, ecc_attrs_info_tbl);
-	if (!hardware_node) {
-		pr_err("failed to add hardware node its attributes under stats\n");
-		return -1;
-	}
-
-	return 0;
-}
-
 /**
  * nsysfsmetric_get_hbm_error_count_v2() - check hbm repairable/unrepairable error count
  *
@@ -880,6 +929,172 @@ static int nsysfsmetric_add_tensor_engine_node_v2(struct nsysfsmetric_metrics *m
 
 
 /* PCI Functions */
+
+static const struct neuron_platform_desc v2_platform_std = {
+	.type = NEURON_PLATFORM_TYPE_STD,
+	.family = NEURON_PLATFORM_FAMILY_NONE,
+	.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+	.device_count = 16,
+	.default_node_cnt = 0,
+	.pod_type = NEURON_POD_TYPE_NONE,
+	.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+	.max_bars = 0,
+	.nc_efa_bdf_tbl = { .bdfs = trn1_nc_efa_bdf_tbl, .count = sizeof(trn1_nc_efa_bdf_tbl) / sizeof(trn1_nc_efa_bdf_tbl[0]) },
+	.num_sleds_per_server = 2,
+	.num_chips_per_sled = 8,
+};
+
+static const char *const v2_trn1_2xl_instance_names[] = {
+	"trn1.2xlarge",
+	NULL,
+};
+
+static const char *const v2_trn1_instance_names[] = {
+	"trn1.32xlarge",
+	NULL,
+};
+
+static const char *const v2_trn1n_instance_names[] = {
+	"trn1n.32xlarge",
+	NULL,
+};
+
+static const char *const v2_inf2_small_instance_names[] = {
+	"inf2.xlarge",
+	"inf2.8xlarge",
+	NULL,
+};
+
+static const char *const v2_inf2_24xl_instance_names[] = {
+	"inf2.24xlarge",
+	NULL,
+};
+
+static const char *const v2_inf2_48xl_instance_names[] = {
+	"inf2.48xlarge",
+	NULL,
+};
+
+static const char *const v2_inf2e_instance_names[] = {
+	"inf2e.32xlarge",
+	NULL,
+};
+
+static const struct neuron_platform_desc v2_platform_table[] = {
+	{
+		.instance_names = v2_trn1_2xl_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_TRN1,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 1,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 1,
+	},
+	{
+		.instance_names = v2_trn1_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_TRN1,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 16,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_TORUS } },
+		.nc_efa_bdf_tbl = { .bdfs = trn1_nc_efa_bdf_tbl, .count = sizeof(trn1_nc_efa_bdf_tbl) / sizeof(trn1_nc_efa_bdf_tbl[0]) },
+		.num_sleds_per_server = 2,
+		.num_chips_per_sled = 8,
+	},
+	{
+		.instance_names = v2_trn1n_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_TRN1N,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 16,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_TORUS } },
+		.nc_efa_bdf_tbl = { .bdfs = trn1n_nc_efa_bdf_tbl, .count = sizeof(trn1n_nc_efa_bdf_tbl) / sizeof(trn1n_nc_efa_bdf_tbl[0]) },
+		.num_sleds_per_server = 2,
+		.num_chips_per_sled = 8,
+	},
+	{
+		.instance_names = v2_inf2_24xl_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_INF2,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 6,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_RING } },
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 6,
+	},
+	{
+		.instance_names = v2_inf2_small_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_INF2,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 1,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 1,
+	},
+	{
+		.instance_names = v2_inf2_48xl_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_INF2,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 12,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_RING } },
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 12,
+	},
+	{
+		.instance_names = v2_inf2e_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.family = NEURON_PLATFORM_FAMILY_TRN1N,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 16,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_TORUS } },
+		.nc_efa_bdf_tbl = { .bdfs = trn1n_nc_efa_bdf_tbl, .count = sizeof(trn1n_nc_efa_bdf_tbl) / sizeof(trn1n_nc_efa_bdf_tbl[0]) },
+		.num_sleds_per_server = 2,
+		.num_chips_per_sled = 8,
+	},
+	{ }
+};
+
+static const struct neuron_platform_desc *ndhal_select_platform_v2(void)
+{
+	const struct neuron_platform_desc *platform;
+
+	platform = nplatform_get_platform_desc(v2_platform_table);
+
+	return platform ? platform : &v2_platform_std;
+}
+
+static int neuron_pci_init_v2(struct neuron_device *nd) {
+	return 0;
+}
 
 // for V2 rename Neuron devices for better customer experience.
 // see internal documentation: TRN1-Discovery
@@ -1037,6 +1252,9 @@ static void ndma_get_wait_for_completion_time_v2(u32 count, bool async, u64 *fir
 	// https://tiny.amazon.com/8jw7wl18
 	// In the meantime make the timeout 100x the original
 	*following_wait_time *= 100;
+	if (narch_is_qemu() || narch_is_emu()) {
+		*following_wait_time *= 100 * 1000;
+	}
 }
 
 /**
@@ -1423,6 +1641,7 @@ int ndhal_register_funcs_v2(void) {
 		return -EINVAL;
 	}
 
+	ndhal->ndhal_arch.platform = ndhal_select_platform_v2();
 	ndhal->ndhal_arch.narch_platform_ready = narch_platform_ready_v2;
 	ndhal->ndhal_address_map.pci_host_base = V2_PCIE_A0_BASE;
 	ndhal->ndhal_address_map.mmap_nc_event_offset = V2_MMAP_NC_EVENT_OFFSET;
@@ -1439,10 +1658,14 @@ int ndhal_register_funcs_v2(void) {
 	ndhal->ndhal_address_map.ts_per_device = V2_TS_PER_DEVICE;
 	ndhal->ndhal_address_map.dma_eng_per_nc = V2_DMA_ENG_PER_NC;
 	ndhal->ndhal_address_map.num_hbms = V2_NUM_HBMS;
+	ndhal->ndhal_address_map.hbm_active_size = V2_HBM_0_SIZE;
 	ndhal->ndhal_address_map.nq_per_nc = V2_MAX_NQ_SUPPORTED;
+	ndhal->ndhal_address_map.supported_lnc_degrees = BIT(1);
 	ndhal->ndhal_reset.initiate_max_wait_time = V2_NR_RESET_INIT_MAX_TOTAL_WAIT_TIME_MS;
 	ndhal->ndhal_reset.retry_count = NR_RESET_RETRY_COUNT;
 	ndhal->ndhal_reset.nr_post_reset_config = nr_post_reset_config_v2;
+	ndhal->ndhal_fw_metrics.max_misc_ram_version = 0; // v2 never negotiates the fw HBM layout
+	ndhal->ndhal_fw_metrics.parse_payload = NULL;
 	ndhal->ndhal_topsp.ts_nq_init = ts_nq_init_v2;
 	ndhal->ndhal_topsp.ts_nq_destroy_one = ts_nq_destroy_one_v2;
 	ndhal->ndhal_topsp.ts_nq_get_nqid = ts_nq_get_nqid_v2;
@@ -1452,6 +1675,12 @@ int ndhal_register_funcs_v2(void) {
 	ndhal->ndhal_nq.nnq_get_nqid = nnq_get_nqid_v2;
 	ndhal->ndhal_nq.nnq_set_hwaddr = nnq_set_hwaddr_v2;
 	ndhal->ndhal_nq.nnq_get_nq_queue_count = nnq_get_nq_queue_count_v2;
+	ndhal->ndhal_nq.nnq_get_nq_h2d_id = nnq_get_nq_h2d_id_v2;
+	ndhal->ndhal_nq.nnq_get_h2d_id = nnq_get_h2d_id_v2;
+	ndhal->ndhal_nq.h2d_dma_nq_nc_id_supported = true;
+	ndhal->ndhal_nq.nnq_set_h2d_hwaddr = nnq_set_h2d_hwaddr_v2;
+	ndhal->ndhal_nq.nnq_set_nq_h2d_enable = nnq_set_nq_h2d_enable_v2;
+	ndhal->ndhal_nq.nnq_get_nq_h2d_enable = nnq_get_nq_h2d_enable_v2;
 	ndhal->ndhal_mpset.mp_min_alloc_size = (mempool_min_alloc_size < 1024) ? 1024 : mempool_min_alloc_size;  // v2 has a bigger mem size and gen pool create fails if < 1024
 	ndhal->ndhal_mpset.small_pool_supported = true;
 	ndhal->ndhal_mpset.mpset_set_dram_and_mpset_info = mpset_set_dram_and_mpset_info_v2;
@@ -1471,14 +1700,12 @@ int ndhal_register_funcs_v2(void) {
 	ndhal->ndhal_fw_io.fw_io_post_metric = fw_io_post_metric_v2;
 	ndhal->ndhal_mmap.dm_mmap_special = dm_mmap_special_v2;
 	ndhal->ndhal_mmap.mmap_get_bar4_offset = mmap_get_bar4_offset_v2;
-	ndhal->ndhal_sysfs_metrics.root_info_node_attrs_info_tbl_cnt = root_info_node_attrs_info_tbl_cnt_v2;
-	ndhal->ndhal_sysfs_metrics.root_info_node_attrs_info_tbl = root_info_node_attrs_info_tbl_v2;
-	ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_ecc_nodes = nsysfsmetric_add_ecc_nodes_v2;
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_get_hbm_error_count = nsysfsmetric_get_hbm_error_count_v2;
 	ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_tensor_engine_node = nsysfsmetric_add_tensor_engine_node_v2;
 	ndhal->ndhal_sysfs_metrics.health_status_enabled = false;
 	ndhal->ndhal_pci.axi_bar = BAR_UNUSED;
 	ndhal->ndhal_pci.dram_bar = 4;
+	ndhal->ndhal_pci.neuron_pci_init = neuron_pci_init_v2;
 	ndhal->ndhal_pci.neuron_pci_get_device_id = neuron_pci_get_device_id_v2;
 	ndhal->ndhal_pci.neuron_pci_device_id_to_rid_map = neuron_pci_device_id_to_rid_map_v2; 
 	ndhal->ndhal_cdev.ncdev_mem_regions = ncdev_mem_regions_v2;
@@ -1518,12 +1745,28 @@ int ndhal_register_funcs_v2(void) {
 	ndhal->ndhal_ext_cleanup = ndhal_ext_cleanup_v2;
 
 	if (narch_is_qemu()) {
+		// initialize qemu setups to full device by default
+		if (nc_per_dev_param == 0) {
+			nc_per_dev_param = V2_NC_PER_DEVICE;
+		}
+		if (dev_nc_map == 0) {
+			dev_nc_map = ((1 << V2_NC_PER_DEVICE) - 1);
+		}
 		ndhal->ndhal_reset.nr_initiate_reset = nr_initiate_reset_v2_qemu;
 		ndhal->ndhal_reset.nr_wait_for_reset_completion = nr_wait_for_reset_completion_v2_qemu;
-		ndhal->ndhal_address_map.seng_dma_eng_per_nd = V2_NC_PER_DEVICE * V2_DMA_ENG_PER_NC;
-		ndhal->ndhal_address_map.h2d_dma_eng_per_nd = V2_NUM_H2D_DMA_PER_DEVICE;
+		ndhal->ndhal_address_map.seng_dma_eng_per_nd = nc_per_dev_param * V2_DMA_ENG_PER_NC;
+		ndhal->ndhal_address_map.h2d_dma_eng_per_nd = nc_per_dev_param;
+		ndhal->ndhal_address_map.nc_per_device = nc_per_dev_param;
+		ndhal->ndhal_address_map.dev_nc_map = dev_nc_map;
 		ndhal->ndhal_pci.apb_bar = 2;
 	} else if (narch_is_emu()) {
+		// initialize emu setups to single-tpb by default
+		if (nc_per_dev_param == 0) {
+			nc_per_dev_param = 1;
+		}
+		if (dev_nc_map == 0) {
+			dev_nc_map = 1;
+		}
 		ndhal->ndhal_reset.retry_count *= 1000; // wait longer on the emulator
 		ndhal->ndhal_reset.nr_initiate_reset = nr_initiate_reset_v2_emu;
 		ndhal->ndhal_reset.nr_wait_for_reset_completion = nr_wait_for_reset_completion_v2_emu;
@@ -1567,3 +1810,4 @@ int ndhal_register_funcs_v2(void) {
 
 	return ret;
 }
+

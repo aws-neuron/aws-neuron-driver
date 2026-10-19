@@ -126,3 +126,4 @@ ssize_t npe_class_server_id_show_data(char *buf, u32 sz);
 ssize_t npe_class_ultraserver_mode_show_data(char *buf);
 
 #endif
+

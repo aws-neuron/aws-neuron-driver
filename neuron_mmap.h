@@ -188,3 +188,4 @@ unsigned long nmmap_get_unmapped_area(struct file *filep, unsigned long addr,
 				      unsigned long len, unsigned long pgoff,
 				      unsigned long flags);
 #endif
+

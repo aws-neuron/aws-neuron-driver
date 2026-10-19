@@ -110,3 +110,4 @@ int ncrwl_writer_downgrade(struct neuron_device *nd, u32 nc_index, struct neuron
 void ncrwl_release_current_process(struct neuron_device *nd);
 
 #endif
+

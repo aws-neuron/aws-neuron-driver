@@ -1,7 +1,7 @@
-#!/usr/bin/sh
+#!/bin/sh
 
-NAME=MODULE_NAME
-VERSION=MODULE_VERSION
+NAME=aws-neuronx
+VERSION=2.31.7.0
 
 set -e
 

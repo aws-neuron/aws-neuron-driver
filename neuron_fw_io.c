@@ -324,6 +324,9 @@ static const u32 fw_io_cmd_timeout_tbl[FW_IO_CMD_MAX] = {
 	(1000 * 1000 * 90),  // cmd 3 (FW_IO_CMD_SET_POWER_PROFILE)
 	(1000 * 1000 * 10),   // cmd 4 (FW_IO_CMD_GET_DATA)
 	(1000 * 1000 * 60),   // cmd 5 (FW_IO_CMD_SET_FEATURE)
+	0,   // cmd 6 (currently unimplemented in Driver)
+	(1000 * 1000 * 20),   // cmd 7 (FW_IO_CMD_SET_PCIE_PROFILE)
+	(1000 * 1000 * 20),  // cmd 8 (FW_IO_CMD_SET_MAX_VERSION) - the ack has no spec'd latency bound: measured ~5s at load and ~10s after a device reset
 };
 
 static const u32 fw_io_cmd_retry_tbl[FW_IO_CMD_MAX] = {
@@ -333,6 +336,9 @@ static const u32 fw_io_cmd_retry_tbl[FW_IO_CMD_MAX] = {
 	3,   // cmd 3 (FW_IO_CMD_SET_POWER_PROFILE)
 	3,   // cmd 4 (FW_IO_CMD_GET_DATA)
 	3,   // cmd 5 (FW_IO_CMD_SET_FEATURE)
+	0,   // cmd 6 (currently unimplemented in Driver)
+	3,   // cmd 7 (FW_IO_CMD_SET_PCIE_PROFILE)
+	1,   // cmd 8 (FW_IO_CMD_SET_MAX_VERSION)
 };
 
 static u32 crc32c(const u8 *hdr, const u8 *data, size_t len) 
@@ -433,13 +439,16 @@ done:
 	return ret;
 }
 
-int fw_io_execute_request_new(struct fw_io_ctx *ctx, u8 command_id, const u8 *req, u32 req_size, u8 *resp, u32 resp_size)
+int fw_io_execute_request_new(struct fw_io_ctx *ctx, u8 command_id, const u8 *req, u32 req_size,
+			      u8 *resp, u32 resp_size, u32 *fw_error_code)
 {
 	int ret;
 	int i, j;
 	union fw_io_request_hdr req_header;
 
 	u32 api_version_num = 0;
+
+	*fw_error_code = FW_IO_SUCCESS;
 
 	ret = fw_io_api_version_read(ctx->bar0, &api_version_num);
 
@@ -508,6 +517,8 @@ int fw_io_execute_request_new(struct fw_io_ctx *ctx, u8 command_id, const u8 *re
 			continue;
 		}
 
+		*fw_error_code = resp_header.hdr.error_code;
+
 		if (resp_header.hdr.error_code == FW_IO_SUCCESS) {
 			u32 data_size = resp_header.hdr.size - sizeof(resp_header);
 			if (data_size > 0 && resp != NULL) {
@@ -527,16 +538,49 @@ int fw_io_execute_request_new(struct fw_io_ctx *ctx, u8 command_id, const u8 *re
 			break;
 		}
 
-		ctx->fw_io_err_count++;
-		pr_err("seq: %u, cmd: %u failed %u\n", ctx->next_seq_num, command_id, resp_header.hdr.error_code);
 		ret = -EIO;
 		if (resp_header.hdr.error_code == FW_IO_UNKNOWN_COMMAND) {
+			// expected while probing firmware that predates a command
+			// (e.g. SET_MAX_VERSION) - informational, not an error
+			if (command_id == FW_IO_CMD_SET_MAX_VERSION) {
+				pr_info_once("cmd: %u not supported by firmware\n", command_id);
+			} else {
+				ctx->fw_io_err_count++;
+				pr_err_ratelimited("seq: %u, cmd: %u failed %u\n", ctx->next_seq_num, command_id, resp_header.hdr.error_code);
+			}
 			break;
 		}
+		ctx->fw_io_err_count++;
+		pr_err("seq: %u, cmd: %u failed %u\n", ctx->next_seq_num, command_id, resp_header.hdr.error_code);
 	}
 
 	mutex_unlock(&ctx->lock);
 	return ret;
+}
+
+int fw_io_set_max_version(struct fw_io_ctx *ctx, u32 max_misc_ram_version)
+{
+	u32 fw_err;
+	int ret;
+
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_SET_MAX_VERSION,
+					(const u8 *)&max_misc_ram_version,
+					sizeof(max_misc_ram_version), NULL, 0, &fw_err);
+	if (ret && fw_err == FW_IO_UNKNOWN_COMMAND)
+		return -ENOTSUPP;
+	return ret;
+}
+
+/*
+ * CRC32C (Castagnoli / iSCSI polynomial, init and final xor 0xffffffff) - the
+ * same convention the fw_io command channel uses.  The firmware HBM layout
+ * reader (neuron_fw_layout.c) assumes firmware computes header_crc32 the same
+ * way; the golden vectors both sides must match live in KaenaDriverTest
+ * (test_fw_layout.cc).
+ */
+u32 fw_io_calc_crc32(const u8 *data, u32 len)
+{
+	return crc32c(NULL, data, len);
 }
 
 /** Read the list of addresses given in the address list and returns it's values in the value list
@@ -622,6 +666,14 @@ int fw_io_read_csr_array_direct(void **addrs, u32 *values, u32 num_csrs, bool op
 int fw_io_read_csr_array_readless(void **ptrs, u32 *values, u32 num_csrs)
 {
 	int i, j;
+
+	// Virtual platforms don't model the readless-read mechanism, so they have to
+	// use plain MMIO instead. Keeping that here rather than in each arch's
+	// fw_io_read_csr_array() means a caller cannot pick the readless path on a
+	// platform that has no way to service it.
+	if (narch_is_qemu() || narch_is_emu())
+		return fw_io_read_csr_array_direct(ptrs, values, num_csrs, true);
+
 	for (i = 0; i < MAX_REGIONS; i++) {
 		void *start, *end;
 		if (fwio_read_regions[i].ctx == NULL) {
@@ -722,10 +774,12 @@ int fw_io_post_metric(struct fw_io_ctx *ctx, u8 *data, u32 size)
 
 int fw_io_post_metric_new(struct fw_io_ctx *ctx, u8 *data, u32 size)
 {
+    u32 fw_err;
+
     if (size > FW_IO_REG_METRIC_BUF_SZ) {
         return -E2BIG;
     }
-    return fw_io_execute_request_new(ctx, FW_IO_CMD_POST_TO_CW, data, size, NULL, 0);
+    return fw_io_execute_request_new(ctx, FW_IO_CMD_POST_TO_CW, data, size, NULL, 0, &fw_err);
 }
 
 int fw_io_read_counters(struct fw_io_ctx *ctx, uint64_t addr_in[], uint32_t val_out[],
@@ -847,6 +901,7 @@ void fw_io_get_total_ecc_err_counts(void *bar0, uint32_t *unrepairable_ecc_count
 int fw_io_set_power_profile(struct fw_io_ctx *ctx, uint32_t profile)
 {
 	union fw_io_req_perfprofile_data data = {0};
+	u32 fw_err;
 	data.rec.profile = (uint8_t)profile;
 	data.rec.voltage_margin = 0;
 	data.rec.frequency_index = 0;
@@ -856,13 +911,14 @@ int fw_io_set_power_profile(struct fw_io_ctx *ctx, uint32_t profile)
 		return -EINVAL;
 	}
 
-	return fw_io_execute_request_new(ctx, FW_IO_CMD_SET_POWER_PROFILE, (u8 *)&data, sizeof(data), NULL, 0);
+	return fw_io_execute_request_new(ctx, FW_IO_CMD_SET_POWER_PROFILE, (u8 *)&data, sizeof(data), NULL, 0, &fw_err);
 }
 
 int fw_io_get_performance_profile(struct fw_io_ctx *ctx, uint32_t *profile)
 {
 	struct fw_io_get_data_request req = {0};
 	struct fw_io_get_perfprofile_response resp = {0};
+	u32 fw_err;
 	int ret;
 	if (!ctx || !profile) {
 		return -EINVAL;
@@ -870,7 +926,7 @@ int fw_io_get_performance_profile(struct fw_io_ctx *ctx, uint32_t *profile)
 
 	req.type = FW_IO_GET_DATA_PERF_PROFILE;
 
-	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type), (u8 *)&resp, sizeof(resp));
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type), (u8 *)&resp, sizeof(resp), &fw_err);
 	if (ret == 0) {
 		*profile = (uint32_t)resp.profile;
 	} else {
@@ -892,6 +948,7 @@ int fw_io_enable_throttling_notifications(struct fw_io_ctx *ctx, bool enable)
 	 * This will avoid wiping out other enabled features when disabling one feature
 	 */
 	u8 features = 0;
+	u32 fw_err;
 
 	if (!ctx) {
 		return -EINVAL;
@@ -901,13 +958,14 @@ int fw_io_enable_throttling_notifications(struct fw_io_ctx *ctx, bool enable)
 		features = FW_IO_FEATURE_THROTTLING_NOTIFICATIONS;
 	}
 
-	return fw_io_execute_request_new(ctx, FW_IO_CMD_SET_FEATURE, &features, sizeof(features), NULL, 0);
+	return fw_io_execute_request_new(ctx, FW_IO_CMD_SET_FEATURE, &features, sizeof(features), NULL, 0, &fw_err);
 }
 
 int fw_io_get_available_profiles(struct fw_io_ctx *ctx, u16 feature, u8 *num_profiles, u8 bitmap[32])
 {
 	struct fw_io_get_data_request req = {0};
 	struct fw_io_get_available_profiles_response response;
+	u32 fw_err;
 	int ret;
 	if (!ctx) {
 		return -EINVAL;
@@ -916,7 +974,7 @@ int fw_io_get_available_profiles(struct fw_io_ctx *ctx, u16 feature, u8 *num_pro
 	req.type = FW_IO_GET_DATA_AVAILABLE_PROFILES;
 	req.available_profiles.operation = feature;
 
-	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8*)&req, sizeof(req.type) + sizeof(req.available_profiles), (u8*)&response, sizeof(response));
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8*)&req, sizeof(req.type) + sizeof(req.available_profiles), (u8*)&response, sizeof(response), &fw_err);
 	if (ret) {
 		return ret;
 	}
@@ -930,6 +988,7 @@ int fw_io_get_bar_info(struct fw_io_ctx *ctx, u8 query_type, struct fw_io_bar_en
 {
 	struct fw_io_get_data_request req = {0};
 	struct fw_io_bar_entry_response resp[NEURON_MAX_SWITCH_BARS] = {0};
+	u32 fw_err;
 	int ret = 0;
 	int i = 0;
 
@@ -940,7 +999,7 @@ int fw_io_get_bar_info(struct fw_io_ctx *ctx, u8 query_type, struct fw_io_bar_en
 	req.type = FW_IO_GET_DATA_BAR_INFO;
 	req.bar_info.query_type = query_type;
 
-	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type) + sizeof(req.bar_info), (u8 *)resp, sizeof(resp));
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type) + sizeof(req.bar_info), (u8 *)resp, sizeof(resp), &fw_err);
 	if (ret) {
 		return ret;
 	}
@@ -955,4 +1014,37 @@ int fw_io_get_bar_info(struct fw_io_ctx *ctx, u8 query_type, struct fw_io_bar_en
 	*count = i;
 
 	return 0;
+}
+
+int fw_io_set_pcie_profile(struct fw_io_ctx *ctx, uint8_t profile)
+{
+	u32 fw_err;
+
+	if (!ctx) {
+		return -EINVAL;
+	}
+
+	return fw_io_execute_request_new(ctx, FW_IO_CMD_SET_PCIE_PROFILE, &profile, sizeof(profile), NULL, 0, &fw_err);
+}
+
+int fw_io_get_pcie_profile(struct fw_io_ctx *ctx, uint8_t *profile)
+{
+	struct fw_io_get_data_request req = {0};
+	uint8_t pcie_profile;
+	u32 fw_err;
+	int ret;
+	if (!ctx || !profile) {
+		return -EINVAL;
+	}
+
+	req.type = FW_IO_GET_DATA_PCIE_PROFILE;
+
+	ret = fw_io_execute_request_new(ctx, FW_IO_CMD_GET_DATA, (u8 *)&req, sizeof(req.type), &pcie_profile, sizeof(pcie_profile), &fw_err);
+	if (ret == 0) {
+		*profile = pcie_profile;
+	} else {
+		pr_err("failed to get pcie profile, ret = %d\n", ret);
+	}
+
+	return ret;
 }

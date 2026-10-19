@@ -66,3 +66,4 @@ void ts_nq_destroy_all(struct neuron_device *nd)
 		ndhal->ndhal_topsp.ts_nq_destroy_one(nd, ts_id);
 	}
 }
+

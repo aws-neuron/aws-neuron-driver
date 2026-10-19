@@ -91,19 +91,3 @@ int narch_get_instance_type_name(char *instance_type_name, size_t instance_type_
 #endif
 }
 
-enum neuron_platform_type narch_detect_platform_type(const struct neuron_platform_lookup *table) {
-	char buf[128];
-	int i;
-
-	if (narch_get_instance_type_name(buf, sizeof(buf))) {
-		return NEURON_PLATFORM_TYPE_STD;
-	}
-
-	for (i = 0; table[i].inst_name != NULL; i++) {
-		if (strncmp(buf, table[i].inst_name, strlen(table[i].inst_name)) == 0) {
-			return table[i].platform_type;
-		}
-	}
-
-	return NEURON_PLATFORM_TYPE_STD;
-}

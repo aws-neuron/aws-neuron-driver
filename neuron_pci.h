@@ -12,6 +12,18 @@
 
 #define BAR_UNUSED -1
 
+/*
+ * EFA (K2) generation paired with neuron devices in this system.  Discovered
+ * once at first neuron-device probe; identical for all devices in a system.
+ */
+enum neuron_efa_version {
+	NEURON_EFA_VERSION_NONE = 0,    /* no EFA present */
+	NEURON_EFA_VERSION_V1,
+	NEURON_EFA_VERSION_V2,
+	NEURON_EFA_VERSION_V3,
+	NEURON_EFA_VERSION_V4,
+};
+
 extern struct neuron_device *neuron_devices[MAX_NEURON_DEVICE_COUNT];
 extern int total_neuron_devices;
 extern int wc_enable;
@@ -31,6 +43,13 @@ struct neuron_device *neuron_pci_get_device(u8 device_index);
  * Return: 0 if successful, a negative error code otherwise.
  */
 int neuron_pci_handle_dup_routing_id(void);
+
+/**
+ * neuron_pci_get_efa_version() - Get EFA (K2) card version
+ *
+ * Return: EFA card version if present, NEURON_EFA_VERSION_NONE if no EFA device is present
+ */
+enum neuron_efa_version neuron_pci_get_efa_version(void);
 
 /**
  * neuron_pci_module_init() - Initialize Neuron PCI driver.

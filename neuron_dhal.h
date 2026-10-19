@@ -4,6 +4,7 @@
 #include "neuron_device.h"
 #include "neuron_fw_io.h"
 #include "neuron_mmap.h"
+#include "neuron_platform.h"
 #include "neuron_sysfs_metrics.h"
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
@@ -24,7 +25,7 @@ extern int force_die_flip;
 
 struct ndhal_arch {
     int arch;
-    enum neuron_platform_type platform_type;
+    const struct neuron_platform_desc *platform;
     u32 server_id;
     int (*narch_platform_ready) (struct neuron_device *nd, enum neuron_platform_operation_type platform_operation);
 };
@@ -49,7 +50,9 @@ struct ndhal_address_map {
 	int seng_dma_eng_per_nd;
     int h2d_dma_eng_per_nd;
 	int num_hbms;
+	u64 hbm_active_size;
 	u16 nq_per_nc;
+	u32 supported_lnc_degrees;
 };
 
 struct ndhal_reset {
@@ -79,6 +82,16 @@ struct ndhal_nq {
    u8 (*nnq_get_nqid) (struct neuron_device *nd, u8 nc_id, u8 index, u32 nq_type);
    void (*nnq_set_hwaddr) (struct neuron_device *nd, u8 nc_id, u8 index, u32 nq_type, u32 size, u64 queue_pa);
    u8 (*nnq_get_nq_queue_count) (void);
+
+   // h2d is shared between neuron cores so the nqids
+   // and nq functions need to be separate
+   int (*nnq_get_nq_h2d_id) (uint32_t h2d_eng_id);
+   uint32_t (*nnq_get_h2d_id) (int nq_h2d_id);
+   int (*nnq_set_h2d_hwaddr) (struct neuron_device *nd, uint32_t h2d_eng_id, u32 size, u64 queue_pa);
+   int (*nnq_set_nq_h2d_enable) (struct neuron_device *nd, uint32_t h2d_eng_id, u32 enable);
+   int (*nnq_get_nq_h2d_enable) (struct neuron_device *nd, uint32_t h2d_eng_id, u32 *enable);
+   // NQ_DEVICE_TYPE_H2D_DMA init takes the owning NC (NEURON_DRIVER_FEATURE_H2D_DMA_NQ_NC_ID)
+   bool h2d_dma_nq_nc_id_supported;
 };
 
 struct ndhal_mpset {
@@ -95,7 +108,7 @@ struct ndhal_ndmar {
     int (*ndmar_ctx_queue_bit) (uint32_t h2d_eng_id, uint32_t qid);
     void (*ndmar_ctx_queue_from_bit) (int bit, uint32_t *h2d_eng_id, uint32_t *qid);
     bool (*ndmar_is_h2t_def_q) (struct neuron_device *nd, uint32_t eng_id, uint32_t q_id);
-    bool (*nr_init_h2t_eng) ( int nc_idx, uint32_t nc_map); 
+    bool (*nr_init_h2t_eng) ( int nc_idx, uint32_t nc_map);
     bool (*ndmar_is_nx_ring) (uint32_t eng_id, uint32_t q_id);
     int (*ndmar_quiesce_queues) (struct neuron_device *nd, u32 nc_id, u32 engine_count, u32 *queue_mask);
 };
@@ -120,13 +133,6 @@ struct ndhal_sysfs_metrics {
     char *arch_nc_type_suffix;
     char *arch_instance_suffix;
     char *arch_device_name_suffix;
-    int root_info_node_attrs_info_tbl_cnt;
-    nsysfsmetric_attr_info_t *root_info_node_attrs_info_tbl;
-
-    int (*nsysfsmetric_add_ecc_nodes) (struct nsysfsmetric_metrics *metrics, 
-                                       struct nsysfsmetric_node *stats_node,
-                                       int ecc_attrs_info_tbl_cnt,
-                                       const nsysfsmetric_attr_info_t *attr_info_tbl);
 
     void (*nsysfsmetric_get_hbm_error_count) (struct neuron_device *nd,
                                                  bool repairable,
@@ -147,6 +153,7 @@ struct ndhal_pci {
     int dram_bar;
     u64 dram_bar_size;
 
+    int (*neuron_pci_init) (struct neuron_device *nd);
     int (*neuron_pci_get_device_id) (struct neuron_device *nd, struct pci_dev *dev);
     int (*neuron_pci_device_id_to_rid_map) (uint32_t * count, uint32_t * did_to_rid_map);
 };
@@ -212,6 +219,12 @@ struct ndhal_perf {
     void (*perf_update_hbm_7200_supported) (struct neuron_device *nd);
 };
 
+struct ndhal_fw_metrics {
+    u32 max_misc_ram_version; // sent via SET_MAX_VERSION (vN/neuron_fw_metrics.h)
+    // decode one payload copied out by fw_layout_get_entry(); stub until schemas are adopted
+    int (*parse_payload) (struct neuron_device *nd, u16 type_id, const u8 *payload, u32 length);
+};
+
 struct neuron_dhal {
     unsigned int pci_device_id;
 
@@ -233,6 +246,7 @@ struct neuron_dhal {
 	struct ndhal_npe ndhal_npe;
     struct ndhal_tpb ndhal_tpb;
     struct ndhal_perf ndhal_perf;
+    struct ndhal_fw_metrics ndhal_fw_metrics;
     void (*ndhal_ext_cleanup) (void);
 };
 
@@ -274,3 +288,4 @@ int ndhal_register_funcs_v3(void);
 int ndhal_register_funcs_v4(void);
 
 #endif // #ifndef NEURON_DHAL_H
+

@@ -148,3 +148,4 @@ int npid_get_allocated_memory(struct neuron_device *nd, pid_t pid, size_t *host_
 	*device_memory = nd->attached_processes[slot].memory_used[MEM_LOC_DEVICE - 1];
 	return 0;
 }
+

@@ -62,8 +62,17 @@ int ncdev_module_init(void);
 
 /**
  * ncdev_module_exit() - Clean up and release resources associated with the character devices
- * 
+ *
  */
 void ncdev_module_exit(void);
 
+/**
+ * ncdev_trigger_sysfs_reset() - Trigger a device reset in response to a write to the
+ * neuron{N}/ctrl/reset sysfs node. Only resets when the device is not opened by an application.
+ *
+ * @param nd: the neuron device to reset
+ */
+void ncdev_trigger_sysfs_reset(struct neuron_device *nd);
+
 #endif
+

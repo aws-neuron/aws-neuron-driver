@@ -27,3 +27,4 @@ static inline int _ntest_trigger(enum neuron_test_trigger trigger, u64 trigger_d
 	return ntest_trigger(trigger, trigger_data);
 }
 #endif
+

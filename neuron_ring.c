@@ -18,11 +18,11 @@
 #include "neuron_dhal.h"
 #include "neuron_ring.h"
 
-int nc_per_dev_param = 1;
+int nc_per_dev_param = 0;
 module_param(nc_per_dev_param, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(nc_per_dev_param, "Number of neuron cores");
 
-int dev_nc_map = 1;
+int dev_nc_map = 0;
 module_param(dev_nc_map, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(dev_nc_map, "Map of active neuron cores");
 
@@ -387,7 +387,7 @@ static int ndmar_h2t_ring_alloc(struct neuron_device *nd, int nc_id, int qid)
 		goto error;
 	}
 
-	ret = ndma_ctx_queue_init(&ring->dma_ctx_queue);
+	ret = ndma_zca_dma_ioq_init(eng, ring, &ring->h2t_dma_ioq);
 	if (ret) {
 		pr_err("can't initialize dma context queue\n");
 		goto error_ctx_queue;
@@ -579,6 +579,10 @@ int ndmar_eng_get_state(struct neuron_device *nd, int eng_id, struct neuron_dma_
 		return -EINVAL;
 
 	udma = &eng->udma;
+	if (udma->udma_regs_m2s == NULL || udma->udma_regs_s2m == NULL) {
+		ndmar_release_engine(eng);
+		return -EINVAL;
+	}
 
 	state->tx_state = udma_state_get(udma, UDMA_TX);
 	state->rx_state = udma_state_get(udma, UDMA_RX);
@@ -772,6 +776,8 @@ int ndmar_init(struct neuron_device *nd)
 
 static void ndmar_h2t_ring_free(struct ndma_eng *eng, struct ndma_ring *ring)
 {
+	ndma_zca_dma_ioq_free(&ring->h2t_dma_ioq);
+
 	if (ring->tx_mc) {
 		mc_free(&ring->tx_mc);
 		ring->tx_mc = NULL;
@@ -792,7 +798,6 @@ static void ndmar_h2t_ring_free(struct ndma_eng *eng, struct ndma_ring *ring)
 		ring->h2t_completion_mc = NULL;
 	}
 
-	ndma_ctx_queue_free(eng, ring, &ring->dma_ctx_queue);
 	ndma_h2d_compl_queue_destroy(&ring->dma_compl_queue);
 
 	ndmar_h2t_ring_state_clr(ring);
@@ -865,4 +870,6 @@ void ndmar_close_ncs(struct neuron_device *nd, uint32_t nc_map)
 void ndmar_close(struct neuron_device *nd)
 {
 	ndmar_close_ncs(nd, NEURON_NC_MAP_DEVICE);
+	ndma_h2d_stop_cmpltn_thread(nd);
 }
+

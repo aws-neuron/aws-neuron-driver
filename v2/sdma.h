@@ -103,3 +103,4 @@ static inline int sdma_configure_broadcast(void __iomem *regs_base, int eng_id)
 
 	return 0;
 }
+

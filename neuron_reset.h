@@ -129,3 +129,4 @@ int nr_initiate_reset_via_fw(struct neuron_device *nd, uint32_t nc_map, uint32_t
 int nr_msleep_stoppable(struct neuron_device *nd, uint32_t msec);
 
 #endif
+

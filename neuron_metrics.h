@@ -216,3 +216,4 @@ void nmetric_set_performance_profile(struct neuron_device *nd, int profile);
  */
 void nmetric_set_mode(struct neuron_device *nd, enum neuron_metrics_mode mode);
 #endif
+

@@ -78,3 +78,4 @@ int ntest_trigger(enum neuron_test_trigger trigger, u64 trigger_data)
 	}
 	return 0;
 }
+

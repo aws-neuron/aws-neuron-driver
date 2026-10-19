@@ -22,3 +22,4 @@ typedef struct nrt_tensor_batch_op {
 } nrt_tensor_batch_op_t;
 
 #endif  // NEURON_DRIVER_SHARED_TENSOR_BATCH_OP_H
+

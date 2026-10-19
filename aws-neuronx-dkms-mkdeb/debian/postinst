@@ -1,4 +1,4 @@
-#!/usr/bin/sh
+#!/bin/sh
 # Copyright (C) 2002-2005 Flavio Stanchina
 # Copyright (C) 2005-2006 Aric Cyr
 # Copyright (C) 2007 Mario Limonciello
@@ -6,7 +6,7 @@
 
 set -e
 
-NAME=MODULE_NAME
+NAME=aws-neuronx
 PACKAGE_NAME=$NAME-dkms
 DEB_NAME=$(echo $PACKAGE_NAME | sed 's,_,-,')
 CVERSION=`dpkg-query -W -f='${Version}' $DEB_NAME | awk -F "-" '{print $1}' | cut -d\: -f2`

@@ -13,6 +13,8 @@
 
 #define DMA_H2T_DESC_COUNT 4096
 #define NUM_DMA_ENG_PER_DEVICE 132 // for v2 2 nc with each 16,
+// Max H2D DMA engines per device
+#define NUM_H2D_DMA_PER_DEVICE 8
 
 #define NDMA_QUEUE_DUMMY_RING_DESC_COUNT 64
 #define NDMA_QUEUE_DUMMY_RING_SIZE (NDMA_QUEUE_DUMMY_RING_DESC_COUNT * sizeof(union udma_desc))
@@ -42,6 +44,7 @@ struct ndma_h2d_dma_cmpltn_thread {
 	struct task_struct *thread;
 	wait_queue_head_t wait_queue;
 	atomic64_t nonempty_ctxq_bitmap;
+	u32 rr_start_bit;
 	volatile bool stop;
 };
 
@@ -80,80 +83,6 @@ struct ndma_h2d_compl_queue {
 int ndma_h2d_compl_queue_init(struct neuron_device *nd, struct ndma_h2d_compl_queue *compl_queue);
 void ndma_h2d_compl_queue_destroy(struct ndma_h2d_compl_queue *compl_queue);
 
-/*
- * H2D DMA Context Queue
- * ---------------------
- * A fixed-size circular buffer storing pointers to `ndma_h2t_zcdma_context`.
- * The queue tracks DMA context lifecycles (submitted, pinned, or unpinned)
- * and maintains four logical indices:
- *
- *   1. head
- *        - Index of the first *valid* (non-empty) entry in the queue.
- *        - The context at `head` may be in any ndma_zcdma_state except
- *          NDMA_COMPLETED.
- *
- *   2. tail
- *        - Index of the next free slot where a new context pointer will be
- *          inserted.
- *
- *   3. first_pinned_unsubmitted
- *        - Index of the earliest context that is pinned but not yet submitted.
- *        - If no such context exists, this is set to first_unpinned.
- *
- *   4. first_unpinned
- *        - Index of the earliest context that is unpinned.
- *        - If no such context exists, this is set to tail.
- *
- * Queue state conditions:
- *   - Empty: head == tail
- *   - Full:  head == ((tail + 1) & (capacity - 1))
- *   - Current size: (tail - head + capacity) & (capacity - 1)
- *
- * Example (capacity = 10):
- *
- *   index:  0    1    2    3    4    5    6    7    8    9
- *   entry: [ ]  [S]  [S]  [S]  [P]  [P]  [U]  [U]  [ ]  [ ]
- *                ^              ^         ^         ^
- *                |              |         |         |
- *                H             FPU       FU         T
- *
- *   Legend:
- *     H  = head
- *     T  = tail
- *     FPU = first_pinned_unsubmitted
- *     FU  = first_unpinned
- *
- *     [C] = completed
- *     [S] = submitted
- *     [P] = pinned but unsubmitted
- *     [U] = unpinned
- *     [ ] = empty slot
- *
- * @entries: Array of DMA context entries in the queue
- * @completion_pool: Pre-allocated pool of completion_ptr buffer
- * @page_list_pool: Pre-allocated pool of page_list arrays
- * @capacity_mask: Maximum number of entries the queue can hold and minus one,
- *                 capacity = capacity_mask + 1
- * @head: Index pointing to the head of the queue
- * @tail: Index pointing to the tail of the queue
- * @first_pinned_unsubmitted: Index of the first pinned but not yet submitted entry
- * @first_unpinned: Index of the first unpinned entry in the queue
- * @nr_pinned_pages: Total count of pinned memory pages belonged to the queue
- */
-struct ndma_ctx_queue {
-	struct ndma_h2t_zcdma_context *entries;
-	void *completion_pool;
-	void *page_list_pool;
-	u32 capacity_mask;
-	u32 head;
-	u32 tail;
-	u32 first_pinned_unsubmitted;
-	u32 first_unpinned;
-	u64 nr_pinned_pages;
-};
-
-int ndma_ctx_queue_init(struct ndma_ctx_queue *queue);
-void ndma_ctx_queue_free(struct ndma_eng *eng, struct ndma_ring *ring, struct ndma_ctx_queue *queue);
 
 /*
  * dma context for both sync and async DMA operations
@@ -174,9 +103,12 @@ struct ndma_h2t_dma_context {
 	u64               offset;             // initial offset for this transfer
 	u64               remaining;          // initial remaining for this transfer
 	u64               outstanding;        // outstanding data for this transfer - used to compute wait time. (vs pending)
-	int               pending_transfers;  // pending transfers for this context.  Used to update ring ptrs
+	int               pending_tx_transfers; // pending tx (m2s) transfers for this context. Used to update ring ptrs
+	int               pending_rx_transfers; // pending rx (s2m) transfers for this context (may differ from tx)
 	void             *completion_ptr;     // completion buffer pointer (host memory buffer we poll on for completions)
 };
+
+struct ndma_h2t_dma_ioq;
 
 struct ndma_ring {
 	// TODO combine all the h2t stuff in a sub structure
@@ -184,8 +116,9 @@ struct ndma_ring {
 	struct udma_ring_ptr h2t_completion;  // TODO why are we using udma_ring_ptr...
 	struct mem_chunk *h2t_completion_mc;
 	struct ndma_h2t_dma_context h2t_dma_ctx[NEURON_DMA_H2T_CTX_HANDLE_CNT];
-	struct ndma_ctx_queue dma_ctx_queue;
+	//TODO - these are blowing up ring size move them to h2t_dma_ioq
 	struct ndma_h2d_compl_queue dma_compl_queue;
+	struct ndma_h2t_dma_ioq *h2t_dma_ioq;
 	u32 h2t_nc_id;
 	bool h2t_allocated; // ring can be allocated for standard use or h2t 
 	u32 qid;
@@ -483,3 +416,4 @@ static inline bool ndmar_qid_valid(int qid)
 	return ((qid >= 0) && (qid < DMA_MAX_Q_MAX));
 }
 #endif
+

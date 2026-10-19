@@ -434,6 +434,33 @@ static inline u32 udma_ring_id_get(struct udma_q *udma_q)
 }
 
 /**
+ * udma_ring_id_set() - Write the current ring id (phase bit) into a descriptor
+ *
+ * @udma_q: udma queue data structure the descriptor belongs to
+ * @desc: descriptor whose ring-id bits should be overwritten
+ *
+ * Advances the queue's phase-bit tracking (via udma_ring_id_get()) and
+ * rewrites the ring-id field of @desc's len_ctrl, using the M2S or S2M
+ * mask/shift as appropriate for the queue's direction. Any pre-existing
+ * ring-id bits in @desc are discarded.
+ *
+ * @note Like udma_ring_id_get(), this must be called exactly once per
+ *       allocated descriptor to keep phase-bit tracking correct.
+ */
+static inline void udma_ring_id_set(struct udma_q *udma_q, union udma_desc *desc)
+{
+	u32 ring_id = udma_ring_id_get(udma_q);
+
+	if (udma_q->type == UDMA_TX) {
+		desc->tx.len_ctrl = (desc->tx.len_ctrl & ~M2S_DESC_RING_ID_MASK) |
+		                    ((ring_id << M2S_DESC_RING_ID_SHIFT) & M2S_DESC_RING_ID_MASK);
+	} else {
+		desc->rx.len_ctrl = (desc->rx.len_ctrl & ~S2M_DESC_RING_ID_MASK) |
+		                    ((ring_id << S2M_DESC_RING_ID_SHIFT) & S2M_DESC_RING_ID_MASK);
+	}
+}
+
+/**
  * udma_desc_action_add() - Add number descriptors to the submission queue.
  *
  * @udma_q: queue handle
@@ -551,3 +578,4 @@ int udma_m2m_copy_prepare_one(struct udma *udma, u32 qid, dma_addr_t s_addr, dma
 int udma_m2m_copy_start(struct udma *udma, u32 qid, u32 m2s_count, u32 s2m_count);
 
 #endif
+

@@ -81,6 +81,11 @@ enum nsysfsmetric_non_nds_ids { // The metrics needed by sysfs metrics but not s
 	NON_NDS_HEALTH_STATUS_OVERALL_HEALTH,
 	NON_NDS_HEALTH_STATUS_HEARTBEAT,
 	NON_NDS_OTHER_POWER_UTILIZATION_RAW,
+	NON_NDS_OTHER_HAM_THROTTLE,
+	NON_NDS_OTHER_CONNECTED_DEVICES,
+	NON_NDS_OTHER_FW_API_VERSION,
+	NON_NDS_OTHER_FW_BUILD,
+	NON_NDS_OTHER_RESET,
 };
 
 struct neuron_device;
@@ -131,7 +136,6 @@ struct nsysfsmetric_metrics { // per neuron_device
     u32 cached_health_regs[HEALTH_STATUS_SLOT_COUNT];
     u32 hw_error_event_count;
     bool health_check_regs_read_failed;
-    struct nsysfsmetric_node *hardware_node;     // stats/hardware/; cached so health_status can attach under it
     struct nsysfsmetric_node *health_status_node; // target for sysfs_notify on hw_error_event
 };
 
@@ -148,10 +152,12 @@ typedef struct nsysfsmetric_counter_node_info {
     nsysfsmetric_attr_info_t attr_info_tbl[MAX_COUNTER_ATTR_TYPE_COUNT]; // present, total, and/or peak
 } nsysfsmetric_counter_node_info_t;
 
+extern const struct attribute_group *neuron_class_groups[];
+
 /**
  * nsysfsmetric_register() - Perform various sysfs inits such as kobj init and attribute group creation per neuron device
  *
- * @nd: The pointer to the device which is the parent of the kobj to be initialized 
+ * @nd: The pointer to the device which is the parent of the kobj to be initialized
  * @nd_kobj: The pointer to the parent kobject of nd->sysfs_metrics.metric_kobj
  */
 int nsysfsmetric_register(struct neuron_device *nd, struct kobject *nd_kobj);
@@ -239,9 +245,10 @@ void nsysfsmetric_set_counter(struct neuron_device *nd, int metric_id_category, 
 void nsysfsmetric_inc_reset_fail_count(struct neuron_device *nd);
 
 /**
- * nsysfsmetric_add_health_status_nodes() - add stats/hardware/health_status/ subtree under the hardware node
+ * nsysfsmetric_add_health_status_nodes() - add the health_status/ subtree (including the
+ * canonical ecc_counters/ location) under the given parent node
  */
-int nsysfsmetric_add_health_status_nodes(struct nsysfsmetric_metrics *metrics, struct nsysfsmetric_node *hardware_node);
+int nsysfsmetric_add_health_status_nodes(struct nsysfsmetric_metrics *metrics, struct nsysfsmetric_node *parent_node);
 
 /**
  * nsysfsmetric_health_status_tick() - perform a single health_status cache refresh; invoked from the metrics thread
@@ -249,3 +256,4 @@ int nsysfsmetric_add_health_status_nodes(struct nsysfsmetric_metrics *metrics, s
 void nsysfsmetric_health_status_tick(struct neuron_device *nd);
 
 #endif
+

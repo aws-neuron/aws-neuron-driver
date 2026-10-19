@@ -75,3 +75,4 @@ void neuron_dhal_free(void)
         kfree(ndhal);
 	}
 }
+

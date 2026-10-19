@@ -122,3 +122,4 @@ void nc_nq_device_init(struct neuron_device *nd);
 
 
 #endif
+

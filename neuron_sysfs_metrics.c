@@ -13,10 +13,22 @@
 #include "neuron_device.h"
 #include "neuron_ds.h"
 #include "neuron_fw_io.h"
+#include "neuron_platform.h"
 #include "neuron_sysfs_metrics.h"
 #include "neuron_dhal.h"
 #include "neuron_power.h"
+#include "neuron_ham_throttle.h"
 #include "share/neuron_driver_shared.h"
+#include "neuron_cdev.h"
+
+#define CONNECTED_DEVICES_MAX_LEN 20
+
+const struct attribute_group *neuron_class_groups[] = {
+	&neuron_soc_group,
+	&efa_group,
+	&platform_group,
+	NULL,
+};
 
 #define NEURON_ARCH_MAX_LEN       20
 
@@ -181,7 +193,7 @@ static const struct healthcheck_status_field healthcheck_status_fields[] = {
     { 9,  0x1, "link_efa" },
     { 10, 0x1, "link_interserver" },
     { 11, 0x1, "link_switch" },
-    { 12, 0x1, "axi_fabric" },
+    { 12, 0x1, "fabric_error" },
 };
 static const int healthcheck_status_fields_cnt = sizeof(healthcheck_status_fields) / sizeof(healthcheck_status_fields[0]);
 
@@ -199,6 +211,14 @@ static const nsysfsmetric_attr_info_t root_arch_node_attrs_info_tbl[] = {
 };
 static const int root_arch_node_attrs_info_tbl_cnt = sizeof(root_arch_node_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
 
+static const nsysfsmetric_attr_info_t root_info_node_attrs_info_tbl[] = {
+    ATTR_INFO("connected_devices", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_CONNECTED_DEVICES), OTHER),
+    ATTR_INFO("fw_api_version", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_FW_API_VERSION), OTHER),
+    ATTR_INFO("fw_build", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_FW_BUILD), OTHER),
+    ATTR_INFO("serial_number", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_SERIAL_NUMBER), OTHER),
+};
+static const int root_info_node_attrs_info_tbl_cnt = sizeof(root_info_node_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
+
 static const nsysfsmetric_attr_info_t power_utilization_attrs_info_tbl[] = {
 	ATTR_INFO("utilization", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_POWER_UTILIZATION), OTHER),
 	ATTR_INFO("utilization_raw", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_POWER_UTILIZATION_RAW), OTHER),
@@ -209,6 +229,17 @@ static const nsysfsmetric_attr_info_t tensor_engine_attrs_info_tbl[] = {
     ATTR_INFO("pe_cntrs", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_COUNTER_PE_ARRAY_ACTIVITY), OTHER),
 };
 static const int tensor_engine_attrs_info_tbl_cnt = sizeof(tensor_engine_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
+
+static const nsysfsmetric_attr_info_t ham_throttle_attrs_info_tbl[] = {
+    ATTR_INFO("throttle", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_HAM_THROTTLE), OTHER),
+};
+static const int ham_throttle_attrs_info_tbl_cnt = sizeof(ham_throttle_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
+
+static const nsysfsmetric_attr_info_t ctrl_node_attrs_info_tbl[] = {
+    ATTR_INFO("reset", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_RESET), OTHER),
+    ATTR_INFO("notify_delay", NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_NOTIFY_DELAY), OTHER),
+};
+static const int ctrl_node_attrs_info_tbl_cnt = sizeof(ctrl_node_attrs_info_tbl) / sizeof(nsysfsmetric_attr_info_t);
 
 static void nsysfsmetric_node_release(struct kobject *kobj)
 {
@@ -501,6 +532,54 @@ static ssize_t nsysfsmetric_show_nrt_other_metrics(struct nsysfsmetric_metrics *
             pr_err_ratelimited("sysfs failed to read pe_array activity counters, error = %d\n", ret);
         }
         len = nsysfsmetric_sysfs_emit(buf, "%s", buffer);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_HAM_THROTTLE)) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+
+        char buffer[256];
+        neuron_ham_throttle_format(nd, attr->nc_id, buffer, sizeof(buffer));
+        len = nsysfsmetric_sysfs_emit(buf, "%s", buffer);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_CONNECTED_DEVICES)) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        u32 connected_devices[MAX_NEURON_DEVICE_COUNT];
+        int connected_device_count = 0;
+        int i, offset = 0;
+        int ret = ndhal->ndhal_fw_io.fw_io_topology(nd->fw_io_ctx, nd->pdev->device, nd->device_index, connected_devices, &connected_device_count);
+        if (ret)
+            return ret;
+        for (i = 0; i < connected_device_count - 1; i++) {
+            offset += snprintf(buf + offset, CONNECTED_DEVICES_MAX_LEN - offset, "%d, ", connected_devices[i]);
+            if (offset >= CONNECTED_DEVICES_MAX_LEN) {
+                pr_err("snprintf failed when showing connected devices\n");
+                return 0;
+            }
+        }
+        if (connected_device_count == 0)
+            offset += snprintf(buf, CONNECTED_DEVICES_MAX_LEN, "\n");
+        else
+            offset += snprintf(buf + offset, CONNECTED_DEVICES_MAX_LEN - offset, "%d\n", connected_devices[connected_device_count - 1]);
+        if (offset >= CONNECTED_DEVICES_MAX_LEN) {
+            pr_err("snprintf failed when showing connected devices\n");
+            return 0;
+        }
+        len = offset;
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_FW_API_VERSION)) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        u32 fw_api_version = 0;
+        fw_io_api_version_read(nd->npdev.bar0, &fw_api_version);
+        if (fw_api_version == 0xdeadbeef) // the value is not readable during reset, try later
+            len = nsysfsmetric_sysfs_emit(buf, "busy\n");
+        else
+            len = nsysfsmetric_sysfs_emit(buf, "%u\n", fw_api_version);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_FW_BUILD)) {
+        struct neuron_device *nd = sysfs_metrics->nd;
+        u32 fw_build = 0;
+        int ret = fw_io_fw_build_read(nd->npdev.bar0, &fw_build);
+        if (ret || fw_build == 0xdeadbeef) // the value is not readable during reset, try later
+            len = nsysfsmetric_sysfs_emit(buf, "busy\n");
+        else
+            len = nsysfsmetric_sysfs_emit(buf, "%u\n", fw_build);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_RESET)) {
+        len = nsysfsmetric_sysfs_emit(buf, "%d\n", sysfs_metrics->nd->device_state);
     } else {
 		pr_err("cannot show sysfs metrics for nc_id=%d, metric_id=%d of attr_type OTHER \n", attr->nc_id, attr->metric_id);
 	}
@@ -652,6 +731,10 @@ static ssize_t nsysfsmetric_set_nrt_other_metrics(struct nsysfsmetric_metrics *s
         } else if (new_notify_delay == 0) {
             nsysfsmetric_notify = true;
         }
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_HAM_THROTTLE)) {
+        neuron_ham_throttle_set_aggregate_count(sysfs_metrics->nd, attr->nc_id, buf, size);
+    } else if (attr->metric_id == NON_NDS_ID_TO_SYSFS_METRIC_ID(NON_NDS_OTHER_RESET)) {
+        ncdev_trigger_sysfs_reset(sysfs_metrics->nd);
     } else {
         pr_err("cannot set sysfs metrics for nc_id=%d, metric_id=%d of attr_type OTHER\n", attr->nc_id, attr->metric_id);
     }
@@ -848,8 +931,28 @@ static int nsysfsmetric_init_and_add_nc_default_nodes(struct neuron_device *nd, 
             return -1;
         }
 
-        // add the neuron_core{0,1, ...}/stats/status node and its children
-        struct nsysfsmetric_node *status_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, stats_node, "status", false, nc_id, 0, NULL);
+        // add the neuron_core{0,1, ...}/stats/hardware node
+        struct nsysfsmetric_node *hardware_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, stats_node, "hardware", false, -1, 0, NULL);
+        if (!hardware_node) {
+            pr_err("failed to create the hardware node under %s stats\n", nc_name);
+            return -1;
+        }
+
+        // add the neuron_core{0,1, ...}/stats/hardware/tensor_engine node
+        ret = ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_tensor_engine_node(sysfs_metrics, hardware_node, nc_id, tensor_engine_attrs_info_tbl_cnt, tensor_engine_attrs_info_tbl);
+        if (ret) {
+            return ret;
+        }
+
+        // add the neuron_core{0,1, ...}/stats/application node
+        struct nsysfsmetric_node *application_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, stats_node, "application", false, -1, 0, NULL);
+        if (!application_node) {
+            pr_err("failed to create the application node under %s stats\n", nc_name);
+            return -1;
+        }
+
+        // add the neuron_core{0,1, ...}/stats/application/status node and its children
+        struct nsysfsmetric_node *status_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, application_node, "status", false, nc_id, 0, NULL);
         if (!status_node) {
             pr_err("failed to create the status node under %s\n", nc_name);
             return -1;
@@ -857,6 +960,18 @@ static int nsysfsmetric_init_and_add_nc_default_nodes(struct neuron_device *nd, 
         ret = nsysfsmetric_init_and_add_nodes(sysfs_metrics, status_node, status_counter_nodes_info_tbl_cnt, status_counter_nodes_info_tbl, nc_id);
         if (ret) {
             pr_err("failed to add the status node's children under %s\n", nc_name);
+            return ret;
+        }
+
+        // add the neuron_core{0,1, ...}/stats/application/other_info node and its children
+        struct nsysfsmetric_node *custom_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, application_node, "other_info", false, nc_id, 0, NULL);
+        if (!custom_node) {
+            pr_err("failed to create the other_info node under %s\n", nc_name);
+            return -1;
+        }
+        ret = nsysfsmetric_init_and_add_nodes(sysfs_metrics, custom_node, custom_counter_nodes_info_tbl_cnt, custom_counter_nodes_info_tbl, nc_id);
+        if (ret) {
+            pr_err("failed to add the other_info node's children under %s\n", nc_name);
             return ret;
         }
 
@@ -884,22 +999,14 @@ static int nsysfsmetric_init_and_add_nc_default_nodes(struct neuron_device *nd, 
             return ret;
         }
 
-        // add the neuron_core{0,1, ...}/stats/other_info node and its children
-        struct nsysfsmetric_node *custom_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, stats_node, "other_info", false, nc_id, 0, NULL);
-        if (!custom_node) {
-            pr_err("failed to create the other_info node under %s\n", nc_name);
-            return -1;
-        }
-        ret = nsysfsmetric_init_and_add_nodes(sysfs_metrics, custom_node, custom_counter_nodes_info_tbl_cnt, custom_counter_nodes_info_tbl, nc_id);
-        if (ret) {
-            pr_err("failed to add the other_info node's children under %s\n", nc_name);
-            return ret;
-        }
-
-        // add the neuron_core{0,1, ...}/stats/tensor_engine node
-        ret = ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_tensor_engine_node(sysfs_metrics, stats_node, nc_id, tensor_engine_attrs_info_tbl_cnt, tensor_engine_attrs_info_tbl);
-        if (ret) {
-            return ret;
+        // add the neuron_core{0,1, ...}/stats/ham_throttle node.
+        if (narch_get_arch() == NEURON_ARCH_V3 ||
+            narch_get_arch() == NEURON_ARCH_V4) {
+            struct nsysfsmetric_node *ham_throttle_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, hardware_node, "ham_throttle", false, nc_id, ham_throttle_attrs_info_tbl_cnt, ham_throttle_attrs_info_tbl);
+            if (!ham_throttle_node) {
+                pr_err("failed to create the ham_throttle node under %s hardware\n", nc_name);
+                return -1;
+            }
         }
 
         // add the neuron_core{0,1, ...}/info node
@@ -907,6 +1014,11 @@ static int nsysfsmetric_init_and_add_nc_default_nodes(struct neuron_device *nd, 
         if (!info_node) {
             pr_err("failed to add info under sysfs metric root\n");
             return -1;
+        }
+        // add the neuron_core{0,1, ...}/info/efa_device symlink
+        int efa_symlink_ret = nplatform_sysfs_add_efa_symlink(nd, &info_node->kobj, nc_id);
+        if (efa_symlink_ret) {
+            pr_err("nd%d nc:%d: failed to link efa_device: %d\n", nd->device_index, nc_id, efa_symlink_ret);
         }
         // add the neuron_core{0,1, ...}/info/architecture node and its attributes
         struct nsysfsmetric_node *arch_node = nsysfsmetric_init_and_add_one_node(sysfs_metrics, info_node, "architecture", false, nc_id, arch_info_attrs_info_tbl_cnt, arch_info_attrs_info_tbl);
@@ -1083,7 +1195,7 @@ int nsysfsmetric_register(struct neuron_device *nd, struct kobject *neuron_devic
     }
 
     // neuron{0, 1, ...}/info/
-    struct nsysfsmetric_node *info_node = nsysfsmetric_init_and_add_one_node(metrics, &metrics->root, "info", false, -1, ndhal->ndhal_sysfs_metrics.root_info_node_attrs_info_tbl_cnt, ndhal->ndhal_sysfs_metrics.root_info_node_attrs_info_tbl);
+    struct nsysfsmetric_node *info_node = nsysfsmetric_init_and_add_one_node(metrics, &metrics->root, "info", false, -1, root_info_node_attrs_info_tbl_cnt, root_info_node_attrs_info_tbl);
     if (!info_node) {
         pr_err("failed to add info node under sysfs metric root\n");
         return -1;
@@ -1120,17 +1232,37 @@ int nsysfsmetric_register(struct neuron_device *nd, struct kobject *neuron_devic
         return ret;
     }
     // neuron{0, 1, ...}/stats/hardware/{sram_ecc_uncorrected, mem_ecc_uncorrected}
-    ret = ndhal->ndhal_sysfs_metrics.nsysfsmetric_add_ecc_nodes(metrics, stats_node, ecc_attrs_info_tbl_cnt, ecc_attrs_info_tbl);
-    if (ret) {
-        return ret;
+    struct nsysfsmetric_node *hardware_node =
+            nsysfsmetric_init_and_add_one_node(metrics, stats_node, "hardware", false, -1,
+                                               ecc_attrs_info_tbl_cnt, ecc_attrs_info_tbl);
+    if (!hardware_node) {
+        pr_err("failed to add hardware node under stats\n");
+        return -1;
     }
 
-    // neuron{0, 1, ...}/stats/hardware/health_status/
-    if (ndhal->ndhal_sysfs_metrics.health_status_enabled && metrics->hardware_node) {
-        ret = nsysfsmetric_add_health_status_nodes(metrics, metrics->hardware_node);
+    // neuron{0, 1, ...}/stats/hardware/power/
+    struct nsysfsmetric_node *power_node =
+            nsysfsmetric_init_and_add_one_node(metrics, hardware_node, "power", false, -1,
+                                               power_utilization_attrs_info_tbl_cnt,
+                                               power_utilization_attrs_info_tbl);
+    if (!power_node) {
+        pr_err("failed to add power utilization sysfs node under stats/hardware/power\n");
+        return -1;
+    }
+
+    // neuron{0, 1, ...}/health_status/
+    if (ndhal->ndhal_sysfs_metrics.health_status_enabled) {
+        ret = nsysfsmetric_add_health_status_nodes(metrics, &metrics->root);
         if (ret) {
             return ret;
         }
+    }
+
+    // neuron{0, 1, ...}/ctrl/{reset, notify_delay}
+    struct nsysfsmetric_node *ctrl_node = nsysfsmetric_init_and_add_one_node(metrics, &metrics->root, "ctrl", false, -1, ctrl_node_attrs_info_tbl_cnt, ctrl_node_attrs_info_tbl);
+    if (!ctrl_node) {
+        pr_err("failed to add ctrl node under sysfs metric root\n");
+        return -1;
     }
 
     // neuron{0, 1, ...}/neuron_core{0, 1, ...}/
@@ -1138,16 +1270,6 @@ int nsysfsmetric_register(struct neuron_device *nd, struct kobject *neuron_devic
     if (ret) {
         pr_err("failed to init and add the neuron_cores directories and the default subdirectories under root\n");
         return ret;
-    }
-
-    // neuron{0, 1, ...}/stats/power
-    struct nsysfsmetric_node *power_node =
-            nsysfsmetric_init_and_add_one_node(metrics, stats_node, "power", false, -1,
-                                               power_utilization_attrs_info_tbl_cnt,
-                                               power_utilization_attrs_info_tbl);
-    if (!power_node) {
-            pr_err("failed to add power utilization sysfs node under stats/power\n");
-            return -1;
     }
 
     return 0;
@@ -1162,7 +1284,6 @@ static void nsysfsmetric_destroy_counters(struct nsysfsmetric_metrics *metrics)
     memset(metrics->nrt_metrics, 0, sizeof(metrics->nrt_metrics));
     memset(metrics->nrt_nd_metrics, 0, sizeof(metrics->nrt_nd_metrics));
     memset(metrics->dev_metrics, 0, sizeof(metrics->dev_metrics));
-    metrics->hardware_node = NULL;
     metrics->health_status_node = NULL;
 }
 
@@ -1200,7 +1321,7 @@ void nsysfsmetric_destroy(struct neuron_device *nd)
 
 /*
  * Reads a configured subset of misc RAM registers and updates the cache exposed via
- * stats/hardware/health_status/. Bumps hw_error_event_count and issues sysfs_notify on any change.
+ * health_status/. Bumps hw_error_event_count and issues sysfs_notify on any change.
  * Invoked periodically from the metrics thread.
  */
 void nsysfsmetric_health_status_tick(struct neuron_device *nd)
@@ -1245,15 +1366,23 @@ void nsysfsmetric_health_status_tick(struct neuron_device *nd)
     }
 }
 
-int nsysfsmetric_add_health_status_nodes(struct nsysfsmetric_metrics *metrics, struct nsysfsmetric_node *hardware_node)
+int nsysfsmetric_add_health_status_nodes(struct nsysfsmetric_metrics *metrics, struct nsysfsmetric_node *parent_node)
 {
-    struct nsysfsmetric_node *node = nsysfsmetric_init_and_add_one_node(metrics, hardware_node,
+    struct nsysfsmetric_node *node = nsysfsmetric_init_and_add_one_node(metrics, parent_node,
             "health_status", false, -1, health_status_attrs_info_tbl_cnt, health_status_attrs_info_tbl);
     if (!node) {
-        pr_err("failed to add health_status node under stats/hardware\n");
+        pr_err("failed to add health_status node\n");
         return -1;
     }
     metrics->health_status_node = node;
+
+    // health_status/ecc_counters/; also exposed under stats/hardware/ for backwards compatibility
+    struct nsysfsmetric_node *ecc_counters_node = nsysfsmetric_init_and_add_one_node(metrics, node,
+            "ecc_counters", false, -1, ecc_attrs_info_tbl_cnt, ecc_attrs_info_tbl);
+    if (!ecc_counters_node) {
+        pr_err("failed to add ecc_counters node under health_status\n");
+        return -1;
+    }
     return 0;
 }
 
@@ -1383,3 +1512,4 @@ void nsysfsmetric_inc_reset_req_count(struct neuron_device *nd, int nc_id)
 {
     nsysfsmetric_inc_counter(nd, NON_NDS_METRIC, NON_NDS_COUNTER_RESET_REQ_COUNT, nc_id, 1, true);
 }
+

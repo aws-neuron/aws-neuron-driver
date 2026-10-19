@@ -156,3 +156,4 @@ int nc_event_set(struct neuron_device *nd, u8 nc_id, u16 event_index, u32 value)
 	writel(value, addr);
 	return 0;
 }
+

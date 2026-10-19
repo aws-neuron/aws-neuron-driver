@@ -16,6 +16,7 @@
 #include "../neuron_dma.h"
 #include "../neuron_pci.h"
 #include "../v3/neuron_pelect.h"
+#include "neuron_fw_metrics.h"
 
 
 // TOP SP addresses are sparse on chip adjust to accommodate the table macro
@@ -148,60 +149,29 @@ static int ndhal_register_funcs_trn3(void) {
 	return 0;
 }
 
-static const struct neuron_platform_lookup v4_platform_map[] = {
-	{"trn3e.24xlarge",      NEURON_PLATFORM_TYPE_MAX},
-	{"trn3e-dev0.24xlarge", NEURON_PLATFORM_TYPE_MAX},
-	{"trn3.48xlarge",       NEURON_PLATFORM_TYPE_PDS},
-	{"trn3-dev0.48xlarge",  NEURON_PLATFORM_TYPE_PDS},
-	{"trn3-dev1.48xlarge",  NEURON_PLATFORM_TYPE_PDS},
-	{"trn3s-es.48xlarge",   NEURON_PLATFORM_TYPE_PDS},
-	{"trn3sn.48xlarge",     NEURON_PLATFORM_TYPE_PDS},
-	{"trn3sn-es.48xlarge",  NEURON_PLATFORM_TYPE_PDS},
-	{"trn3p.48xlarge",      NEURON_PLATFORM_TYPE_ULTRASERVER},
-	{NULL,                  NEURON_PLATFORM_TYPE_INVALID},
+static const uint32_t v4_nnq_h2d_id_to_eng_id[] = {
+	V4_D2H_0_IDX, V4_H2D_0_IDX, V4_D2H_1_IDX, V4_H2D_1_IDX
 };
 
-static enum neuron_platform_type ndhal_platform_type_v4(void)
+static int nnq_get_nq_h2d_id_v4(uint32_t h2d_eng_id)
 {
-	enum neuron_platform_type platform_type;
-
-	platform_type = narch_detect_platform_type(v4_platform_map);
-
-	if (narch_is_qemu() || narch_is_emu())
-		platform_type = NEURON_PLATFORM_TYPE_STD;
-
-	return platform_type;
+	int i;
+	for (i = 0; i < ARRAY_SIZE(v4_nnq_h2d_id_to_eng_id); i++) {
+		if (v4_nnq_h2d_id_to_eng_id[i] == h2d_eng_id)
+			return i;
+	}
+	return -1;
 }
 
-static bool ndhal_instance_type_3xl(void)
+static uint32_t nnq_get_h2d_id_v4(int nq_h2d_id)
 {
-	static const char *const trn3_3xl_instance_names[] = {
-		"trn3pd98.3xlarge",
-		"trn3s-es.3xlarge",
-		"trn3sn.3xlarge",
-		"trn3sn-es.3xlarge",
-	};
-	static bool instance_type_is_3xl = false;
-	char buf[128];
-	int i;
-
-	if (narch_get_instance_type_name(buf, sizeof(buf))) goto done;
-	for (i = 0; i < sizeof(trn3_3xl_instance_names) / sizeof(*trn3_3xl_instance_names); i++) {
-		if (strncmp(buf, trn3_3xl_instance_names[i], strlen(trn3_3xl_instance_names[i])) == 0) {
-			instance_type_is_3xl = true;
-			break;
-		}
-	}
-
-done:
-	return instance_type_is_3xl;
+	return v4_nnq_h2d_id_to_eng_id[nq_h2d_id];
 }
 
 /**
- * ndmar_ctx_queue_bit_v4() - map a V4 H2D queue to a dense bitmap index
+ * * ndmar_ctx_queue_bit_v4() - map a V4 H2D queue to a dense bitmap index
  * @h2d_eng_id: DMA engine id in the V4 H2D/D2H engine range (128 to 131)
  * @qid: DMA queue id within the engine
- *
  * Return bitmap bit index for the queue.
  */
 static int ndmar_ctx_queue_bit_v4(uint32_t h2d_eng_id, uint32_t qid)
@@ -310,35 +280,233 @@ static const u32 v4_torus_routing_id_to_user_id[] = {
 	1,	2,	5,	6,
 	13,	14,	9,	10 };
 
-// map routing id to user id for trn2pds instance type.
-// the only hard rule this map needs to follow is
-// rid (i*2) and rid (i*2)+1 map to did (n*2) and did (n*2)+1
-// since rid (i*2) and rid (i*2)+1 are on the same JBOG.
-static const u32 v4_pds_routing_id_to_user_id[] = {
-	0, 1,
-	2, 3,
-	4, 5,
-	6, 7,
-	8, 9,
-	10, 11,
-	12, 13,
-	14, 15 };
-
-static const u32 v4_max_routing_id_to_user_id[] = {
-	0, 1, 2, 3 };
-
 #define V4_ROUTING_ID_TBL_SZ  (sizeof(v4_torus_routing_id_to_user_id) / sizeof(v4_torus_routing_id_to_user_id[0]))
-#define V4_MAX_ROUTING_ID_TBL_SZ  (sizeof(v4_max_routing_id_to_user_id) / sizeof(v4_max_routing_id_to_user_id[0]))
+
+static const struct neuron_platform_desc v4_platform_std = {
+	.type = NEURON_PLATFORM_TYPE_STD,
+	.family = NEURON_PLATFORM_FAMILY_NONE,
+	.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_TABLE, .table = { v4_torus_routing_id_to_user_id, V4_ROUTING_ID_TBL_SZ } },
+	.device_count = 16,
+	.default_node_cnt = 0,
+	.pod_type = NEURON_POD_TYPE_NONE,
+	.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+	.max_bars = 0,
+	.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_NONE } },
+	.nc_efa_bdf_tbl = { .bdfs = trn3pd_nc_efa_bdf_tbl, .count = sizeof(trn3pd_nc_efa_bdf_tbl) / sizeof(trn3pd_nc_efa_bdf_tbl[0]) },
+	.num_sleds_per_server = 8,
+	.num_chips_per_sled = 2,
+};
+
+static const char *const v4_ultraserver_instance_names[] = {
+	"trn3p.48xlarge",
+	NULL,
+};
+
+static const char *const v4_pds_v2_switch_instance_names[] = {
+	"trn3n.48xlarge",
+	NULL,
+};
+
+static const char *const v4_pds_v1_switch_instance_names[] = {
+	"trn3.48xlarge",
+	"trn3-dev0.48xlarge",
+	"trn3-dev1.48xlarge",
+	"trn3-es.48xlarge",
+	"trn3s-es.48xlarge",
+	NULL,
+};
+
+static const char *const v4_max_v2_switch_instance_names[] = {
+	"trn3e.24xlarge",
+	"trn3en.24xlarge",
+	NULL,
+};
+
+static const char *const v4_max_v1_switch_instance_names[] = {
+	"trn3e-dev0.24xlarge",
+	"trn3e-es.24xlarge",
+	NULL,
+};
+
+// Simulation-only instance name for simulated (QEMU/inkling) MAX compute
+// sleds.  Deliberately not a real instance name: platform capabilities are
+// consumed from the driver's platform descriptor (sysfs), not derived from
+// DMI, so a simulation does not need to impersonate the instance it models.
+static const char *const v4_qemu_max_instance_names[] = {
+	"qemu-trn3max",
+	NULL,
+};
+
+static const char *const v4_3xl_instance_names[] = {
+	"trn3pd98.3xlarge",
+	"trn3s-es.3xlarge",
+	"trn3.3xlarge",
+	"trn3-es.3xlarge",
+	"trn3n.3xlarge",
+	NULL,
+};
+
+static const struct neuron_platform_desc v4_platform_table[] = {
+	{
+		.instance_names = v4_ultraserver_instance_names,
+		.type = NEURON_PLATFORM_TYPE_ULTRASERVER,
+		.family = NEURON_PLATFORM_FAMILY_TRN2_ULTRASERVER, /* trn3p.48xlarge is a dev platform on the deprecation path; use TRN2_ULTRASERVER as it is the publicly documented family for the trn2u topology */
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_TABLE, .table = { v4_torus_routing_id_to_user_id, V4_ROUTING_ID_TBL_SZ } },
+		.device_count = 16,
+		.default_node_cnt = 4,
+		.pod_type = NEURON_POD_TYPE_P2P,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_ELECTION,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_TORUS }, .inter_rack = { .topology = NEURON_INTER_RACK_TOPOLOGY_P2P } },
+		.nc_efa_bdf_tbl = { .bdfs = trn3pd_nc_efa_bdf_tbl, .count = sizeof(trn3pd_nc_efa_bdf_tbl) / sizeof(trn3pd_nc_efa_bdf_tbl[0]) },
+		.num_sleds_per_server = 8,
+		.num_chips_per_sled = 2,
+	},
+	{
+		.instance_names = v4_pds_v2_switch_instance_names,
+		.type = NEURON_PLATFORM_TYPE_PDS,
+		.family = NEURON_PLATFORM_FAMILY_TRN3_GEN1_ULTRASERVER,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 16,
+		.default_node_cnt = 4,
+		.pod_type = NEURON_POD_TYPE_SWITCH,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_FW_IO,
+		.max_bars = 1,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_SWITCH, .switch_type = NEURON_SWITCH_TYPE_V2 }, .inter_rack = { .topology = NEURON_INTER_RACK_TOPOLOGY_P2P } },
+		.nc_efa_bdf_tbl = { .bdfs = trn3pds_nc_efa_bdf_tbl, .count = sizeof(trn3pds_nc_efa_bdf_tbl) / sizeof(trn3pds_nc_efa_bdf_tbl[0]) },
+		.num_sleds_per_server = 8,
+		.num_chips_per_sled = 2,
+	},
+	{
+		.instance_names = v4_pds_v1_switch_instance_names,
+		.type = NEURON_PLATFORM_TYPE_PDS,
+		.family = NEURON_PLATFORM_FAMILY_TRN3_GEN1_ULTRASERVER,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 16,
+		.default_node_cnt = 4,
+		.pod_type = NEURON_POD_TYPE_SWITCH,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_FW_IO,
+		.max_bars = 1,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_SWITCH, .switch_type = NEURON_SWITCH_TYPE_V1 }, .inter_rack = { .topology = NEURON_INTER_RACK_TOPOLOGY_P2P } },
+		.nc_efa_bdf_tbl = { .bdfs = trn3pds_nc_efa_bdf_tbl, .count = sizeof(trn3pds_nc_efa_bdf_tbl) / sizeof(trn3pds_nc_efa_bdf_tbl[0]) },
+		.num_sleds_per_server = 8,
+		.num_chips_per_sled = 2,
+	},
+	{
+		.instance_names = v4_max_v2_switch_instance_names,
+		.type = NEURON_PLATFORM_TYPE_MAX,
+		.family = NEURON_PLATFORM_FAMILY_TRN3_GEN2_ULTRASERVER,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 4,
+		.default_node_cnt = 1,
+		.pod_type = NEURON_POD_TYPE_SWITCH,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_FW_IO,
+		.max_bars = 2,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_SWITCH, .switch_type = NEURON_SWITCH_TYPE_V2 }, .inter_rack = { .topology = NEURON_INTER_RACK_TOPOLOGY_P2P } },
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 4,
+	},
+	{
+		.instance_names = v4_max_v1_switch_instance_names,
+		.type = NEURON_PLATFORM_TYPE_MAX,
+		.family = NEURON_PLATFORM_FAMILY_TRN3_GEN2_ULTRASERVER,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 4,
+		.default_node_cnt = 1,
+		.pod_type = NEURON_POD_TYPE_SWITCH,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_FW_IO,
+		.max_bars = 2,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_SWITCH, .switch_type = NEURON_SWITCH_TYPE_V1 }, .inter_rack = { .topology = NEURON_INTER_RACK_TOPOLOGY_P2P } },
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 4,
+	},
+	{
+		.instance_names = v4_3xl_instance_names,
+		.type = NEURON_PLATFORM_TYPE_STD,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 1,
+		.default_node_cnt = 0,
+		.pod_type = NEURON_POD_TYPE_NONE,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 1,
+	},
+	{
+		// Simulated (QEMU/inkling) MAX compute sled.  A simulated compute
+		// sled is one QEMU guest standing in for the sled's integrated host
+		// CPU, so a guest presents like the physical single-sled MAX
+		// instances above: same SEQUENTIAL routing over the sled's four
+		// MLAs.  This entry differs from the physical MAX descriptors only
+		// where the device model falls short of real FW today:
+		//   - pod_discovery NONE: the model implements no FW_IO pod
+		//     registers (serial number, partition size, reservation id) yet.
+		//   - max_bars 0: no switch BAR-info emulation yet.
+		// Both are staged, not permanent: they follow as soon as the device
+		// model grows the corresponding FW_IO surface.  The simulation-only
+		// instance name cannot appear on real hardware, and the entry is
+		// only selectable from a simulated instance (see
+		// ndhal_select_platform_v4).
+		.instance_names = v4_qemu_max_instance_names,
+		.type = NEURON_PLATFORM_TYPE_MAX,
+		.family = NEURON_PLATFORM_FAMILY_TRN3_GEN2_ULTRASERVER,
+		.routing_config = { .type = NEURON_PLATFORM_ROUTING_TYPE_SEQUENTIAL },
+		.device_count = 4,
+		.default_node_cnt = 1,
+		.pod_type = NEURON_POD_TYPE_SWITCH,
+		.pod_discovery = NEURON_POD_DISCOVERY_TYPE_NONE,
+		.max_bars = 0,
+		.interconnect = { .intra_rack = { .topology = NEURON_INTRA_RACK_TOPOLOGY_SWITCH, .switch_type = NEURON_SWITCH_TYPE_V1 }, .inter_rack = { .topology = NEURON_INTER_RACK_TOPOLOGY_P2P } },
+		.num_sleds_per_server = 1,
+		.num_chips_per_sled = 4,
+	},
+	{ }
+};
+
+static const struct neuron_platform_desc *ndhal_select_platform_v4(void)
+{
+	const struct neuron_platform_desc *platform;
+
+	platform = nplatform_get_platform_desc(v4_platform_table);
+
+	// QEMU/emulator: a simulated system opts in to a platform descriptor by
+	// publishing the simulation-only instance name.  A simulated system
+	// publishing anything else -- in particular the real instance names
+	// every pre-existing simulated system publishes -- presents as STD
+	// exactly as before, rather than matching a physical descriptor whose
+	// probe requirements the simulation may not satisfy.
+	if (narch_is_qemu() || narch_is_emu()) {
+		if (platform && platform->instance_names == v4_qemu_max_instance_names)
+			return platform;
+		return &v4_platform_std;
+	}
+
+	return platform ? platform : &v4_platform_std;
+}
 
 static u32 neuron_pci_routing_id_to_user_id(u32 routing_id)
 {
-	if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_PDS) {
-		return v4_pds_routing_id_to_user_id[ routing_id % V4_ROUTING_ID_TBL_SZ];
+	u32 index = routing_id % ndhal->ndhal_arch.platform->device_count;
+
+	if (ndhal->ndhal_arch.platform->routing_config.type == NEURON_PLATFORM_ROUTING_TYPE_TABLE) {
+		return ndhal->ndhal_arch.platform->routing_config.table.map[index];
 	}
-	if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_MAX) {
-		return v4_max_routing_id_to_user_id[ routing_id % V4_MAX_ROUTING_ID_TBL_SZ];
+	return index;
+}
+
+static bool ndhal_instance_type_3xl(void)
+{
+	char buf[128];
+	int i;
+
+	if (narch_get_instance_type_name(buf, sizeof(buf))) {
+		return false;
 	}
-	return v4_torus_routing_id_to_user_id[routing_id % V4_ROUTING_ID_TBL_SZ];
+	for (i = 0; v4_3xl_instance_names[i]; i++) {
+		if (strncmp(buf, v4_3xl_instance_names[i], strlen(v4_3xl_instance_names[i])) == 0)
+			return true;
+	}
+	return false;
 }
 
 /**
@@ -375,8 +543,7 @@ static int neuron_pci_get_device_id_v4(struct neuron_device *nd, struct pci_dev 
 		return -ENODEV;
 	}
 
-	if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_PDS ||
-	    ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_MAX) {
+	if (ndhal->ndhal_arch.platform->interconnect.intra_rack.topology == NEURON_INTRA_RACK_TOPOLOGY_SWITCH) {
 		int server_id;
 
 		ret = fw_io_server_info_read(nd->npdev.bar0, &server_id, NULL);
@@ -457,9 +624,57 @@ static int ncdev_logical_to_physical_nc_map_v4(struct neuron_ioctl_nc_map *map, 
 	return 0;
 }
 
+#define NC_MAPPING_MAX_CORE_COUNT_MAX_V4 32
+static const struct neuron_ioctl_nc_map_entry nc_mapping_v0_seng_swap_max[] = {
+	{ .device_id = 0,  .device_nc_idx = 2 }, { .device_id = 0,  .device_nc_idx = 3 }, { .device_id = 0,  .device_nc_idx = 0 }, { .device_id = 0,  .device_nc_idx = 1 }, { .device_id = 0,  .device_nc_idx = 4 }, { .device_id = 0,  .device_nc_idx = 5  }, { .device_id = 0,  .device_nc_idx = 6 }, { .device_id = 0,  .device_nc_idx = 7 }, // ND0
+	{ .device_id = 1,  .device_nc_idx = 2 }, { .device_id = 1,  .device_nc_idx = 3 }, { .device_id = 1,  .device_nc_idx = 0 }, { .device_id = 1,  .device_nc_idx = 1 }, { .device_id = 1,  .device_nc_idx = 4 }, { .device_id = 1,  .device_nc_idx = 5  }, { .device_id = 1,  .device_nc_idx = 6 }, { .device_id = 1,  .device_nc_idx = 7 }, // ND1
+	{ .device_id = 2,  .device_nc_idx = 4 }, { .device_id = 2,  .device_nc_idx = 5 }, { .device_id = 2,  .device_nc_idx = 6 }, { .device_id = 2,  .device_nc_idx = 7 }, { .device_id = 2,  .device_nc_idx = 2 }, { .device_id = 2,  .device_nc_idx = 3  }, { .device_id = 2,  .device_nc_idx = 0 }, { .device_id = 2,  .device_nc_idx = 1 }, // ND2
+	{ .device_id = 3,  .device_nc_idx = 4 }, { .device_id = 3,  .device_nc_idx = 5 }, { .device_id = 3,  .device_nc_idx = 6 }, { .device_id = 3,  .device_nc_idx = 7 }, { .device_id = 3,  .device_nc_idx = 2 }, { .device_id = 3,  .device_nc_idx = 3  }, { .device_id = 3,  .device_nc_idx = 0 }, { .device_id = 3,  .device_nc_idx = 1 }, // ND3
+};
+
+#define NC_MAPPING_V0_SENG_SWAP_MAX_SIZE (sizeof(nc_mapping_v0_seng_swap_max) / sizeof(nc_mapping_v0_seng_swap_max[0]))
+static_assert((NC_MAPPING_V0_SENG_SWAP_MAX_SIZE == NC_MAPPING_MAX_CORE_COUNT_MAX_V4) && (NC_MAPPING_V0_SENG_SWAP_MAX_SIZE <= NEURON_NC_MAP_MAX_ENTRIES));
+static int ncdev_logical_to_physical_nc_map_max_v4(struct neuron_ioctl_nc_map *map, uint32_t max_num_entries, enum neuron_ioctl_nc_mapping_type version)
+{
+	uint32_t entry_idx;
+	uint32_t entries_to_copy = (max_num_entries < NC_MAPPING_MAX_CORE_COUNT_MAX_V4) ? max_num_entries : NC_MAPPING_MAX_CORE_COUNT_MAX_V4;
+	const struct neuron_ioctl_nc_map_entry *mapping;
+
+	if (version != NEURON_IOCTL_NC_MAPPING_TYPE_V0) {
+		pr_err("Unsupported Neuron Core Mapping verion %u for v4 arch", version);
+		return -EINVAL;
+	}
+	mapping = nc_mapping_v0_seng_swap_max;
+
+	for (entry_idx = 0; entry_idx < entries_to_copy; entry_idx++) {
+		uint32_t core_idx = entry_idx;
+		WARN_ONCE(core_idx >= NC_MAPPING_MAX_CORE_COUNT_MAX_V4, "core_idx %d > max core count %d", core_idx, NC_MAPPING_MAX_CORE_COUNT_MAX_V4);
+		map->mappings[entry_idx] = mapping[core_idx];
+	}
+	map->num_entries = entries_to_copy;
+
+	return 0;
+}
+
 static void perf_update_hbm_7200_supported_v4(struct neuron_device *nd) {
 	nd->supports_hbm_7200 = 0;
 	return;
+}
+
+/**
+ * ndma_get_engines_with_host_connectivity - get DMA engines for a particular HBM index which have host connectivity
+ * V4 - unlike V3, all DMA engines for an HBM have host connectivity, so use all 32.
+ */
+static void ndma_get_engines_with_host_connectivity_v4(u32 hbm_index, u32 engines[NUM_DMA_ENG_PER_DEVICE], u32 *num_engines)
+{
+	const int num_dma_engines_per_hbm = 32;
+	const int offset = num_dma_engines_per_hbm * hbm_index;
+
+	int i = 0;
+	for (i = 0; i < num_dma_engines_per_hbm; i++) {
+		engines[i] = offset + i;
+	}
+	*num_engines = num_dma_engines_per_hbm;
 }
 
 static int neuron_pci_device_id_to_rid_map_v4(uint32_t *count, uint32_t *did_to_rid_map)
@@ -468,8 +683,7 @@ static int neuron_pci_device_id_to_rid_map_v4(uint32_t *count, uint32_t *did_to_
 
 	for (i = 0; i < total_neuron_devices; i++) {
 		u32 routing_id;
-		if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_PDS ||
-		    ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_MAX) {
+		if (ndhal->ndhal_arch.platform->interconnect.intra_rack.topology == NEURON_INTRA_RACK_TOPOLOGY_SWITCH) {
 			routing_id = i + ndhal->ndhal_arch.server_id * total_neuron_devices;
 		} else {
 			routing_id = i;
@@ -495,19 +709,25 @@ int ndhal_register_funcs_v4(void) {
 		return -EINVAL;
 	}
 
-	ndhal->ndhal_arch.platform_type = ndhal_platform_type_v4();
+	ndhal->ndhal_arch.platform = ndhal_select_platform_v4();
 	ndhal->ndhal_fw_io.new_readless_read_min_api_version = 6;
+	fw_metrics_init_reader_v4();
 	ndhal->ndhal_pci.neuron_pci_get_device_id = neuron_pci_get_device_id_v4;
 	ndhal->ndhal_pci.neuron_pci_device_id_to_rid_map = neuron_pci_device_id_to_rid_map_v4;
 	ndhal->ndhal_npe.npe_neighbor_eng_ids = npe_neighbor_eng_ids_v4;
 	ndhal->ndhal_mpset.mpset_set_dram_and_mpset_info = mpset_set_dram_and_mpset_info_v4;
 	ndhal->ndhal_mmap.dm_mmap_special = dm_mmap_special_v4;
 	ndhal->ndhal_mmap.mmap_get_bar4_offset = mmap_get_bar4_offset_v4;
+	ndhal->ndhal_ndma.ndma_get_engines_with_host_connectivity = ndma_get_engines_with_host_connectivity_v4;
 	ndhal->ndhal_ndmar.ndmar_ctx_queue_bit = ndmar_ctx_queue_bit_v4;
 	ndhal->ndhal_ndmar.ndmar_ctx_queue_from_bit = ndmar_ctx_queue_from_bit_v4;
+	ndhal->ndhal_nq.nnq_get_nq_h2d_id = nnq_get_nq_h2d_id_v4;
+	ndhal->ndhal_nq.nnq_get_h2d_id = nnq_get_h2d_id_v4;
 	ndhal->ndhal_cdev.ncdev_mem_regions = ncdev_mem_regions_v4;
 	ndhal->ndhal_perf.perf_update_hbm_7200_supported = perf_update_hbm_7200_supported_v4;
 	ndhal->ndhal_sysfs_metrics.health_status_enabled = true;
+	ndhal->ndhal_address_map.hbm_active_size = V4_HBM_ACTIVE_SIZE;
+	ndhal->ndhal_address_map.supported_lnc_degrees = BIT(1) | BIT(2);
 
 	if (narch_is_emu()) {
 		// Temporarily disable resets on emulation until support is ready
@@ -518,18 +738,18 @@ int ndhal_register_funcs_v4(void) {
 	// TODO initialization needs refactoring because V4 is piggybacking on V3
 	// which risks double calling any hal init functions
 	//
-	if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_ULTRASERVER) {
+	if (ndhal->ndhal_arch.platform->pod_discovery == NEURON_POD_DISCOVERY_TYPE_ELECTION) {
 		ret = npe_init();
 		if (ret) {
 			pr_err("failed to initialize pod election on V4\n");
 			return ret;
 		}
-	} else if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_PDS) {
+	} else if (ndhal->ndhal_arch.platform->type == NEURON_PLATFORM_TYPE_PDS) {
 		//TODO PDS
 	    ndhal->ndhal_cdev.ncdev_logical_to_physical_nc_map = ncdev_logical_to_physical_nc_map_v4;
-	} else if (ndhal->ndhal_arch.platform_type == NEURON_PLATFORM_TYPE_MAX) {
-	    ndhal->ndhal_cdev.ncdev_logical_to_physical_nc_map = ncdev_logical_to_physical_nc_map_v4;
-	}	
+	} else if (ndhal->ndhal_arch.platform->type == NEURON_PLATFORM_TYPE_MAX) {
+	    ndhal->ndhal_cdev.ncdev_logical_to_physical_nc_map = ncdev_logical_to_physical_nc_map_max_v4;
+	}
 
 	switch (ndhal->pci_device_id) {
 		case TRN3_DEVICE_ID0:
@@ -547,3 +767,4 @@ int ndhal_register_funcs_v4(void) {
 
 	return ret;
 }
+

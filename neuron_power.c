@@ -624,3 +624,4 @@ int npower_init_stats(struct neuron_device *nd)
 
         return 0;
 }
+

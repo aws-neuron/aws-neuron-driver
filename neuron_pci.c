@@ -25,6 +25,7 @@
 #include "neuron_pci.h"
 #include "neuron_log.h"
 #include "neuron_cdev.h"
+#include "neuron_ham_throttle.h"
 
 
 static struct pci_device_id neuron_pci_dev_ids[] = {
@@ -36,6 +37,19 @@ static struct pci_device_id neuron_pci_dev_ids[] = {
 	{
 		0,
 	},
+};
+
+#define EFA_V1_DEVICE_ID 0xEFA0
+#define EFA_V2_DEVICE_ID 0xEFA1
+#define EFA_V3_DEVICE_ID 0xEFA2
+#define EFA_V4_DEVICE_ID 0xEFA3
+
+static const struct pci_device_id neuron_efa_dev_ids[] = {
+	{ PCI_DEVICE(AMZN_VENDOR_ID, EFA_V4_DEVICE_ID), .driver_data = NEURON_EFA_VERSION_V4 },
+	{ PCI_DEVICE(AMZN_VENDOR_ID, EFA_V3_DEVICE_ID), .driver_data = NEURON_EFA_VERSION_V3 },
+	{ PCI_DEVICE(AMZN_VENDOR_ID, EFA_V2_DEVICE_ID), .driver_data = NEURON_EFA_VERSION_V2 },
+	{ PCI_DEVICE(AMZN_VENDOR_ID, EFA_V1_DEVICE_ID), .driver_data = NEURON_EFA_VERSION_V1 },
+	{ 0, },
 };
 
 // some old kernels do not have pci_info defined.
@@ -210,6 +224,32 @@ static int neuron_pci_device_close(struct neuron_device *nd)
 	nd->fw_io_ctx = NULL;
 	mutex_destroy(&nd->lock);
 	return 0;
+}
+
+static enum neuron_efa_version neuron_pci_efa_version = NEURON_EFA_VERSION_NONE;
+
+enum neuron_efa_version neuron_pci_get_efa_version(void)
+{
+	return neuron_pci_efa_version;
+}
+
+static void neuron_pci_probe_efa_version(void)
+{
+	const struct pci_device_id *id;
+	struct pci_dev *pdev;
+
+	if (neuron_pci_efa_version != NEURON_EFA_VERSION_NONE) {
+		return;
+	}
+
+	for (id = neuron_efa_dev_ids; id->vendor; id++) {
+		pdev = pci_get_device(id->vendor, id->device, NULL);
+		if (pdev) {
+			neuron_pci_efa_version = (enum neuron_efa_version)id->driver_data;
+			pci_dev_put(pdev);
+			return;
+		}
+	}
 }
 
 static void neuron_pci_set_device_architecture(struct neuron_device *nd)
@@ -397,6 +437,8 @@ static int neuron_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		goto fail_dhal_init;
 	}
 
+	neuron_pci_probe_efa_version();
+
 	// map apb bar
 	ret = neuron_pci_reserve_bar(dev, ndhal->ndhal_pci.apb_bar, "APB");
 	if (ret) {
@@ -423,6 +465,11 @@ static int neuron_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		goto fail_bar4_map;
 	}
 	ret = neuron_pci_set_npdev(dev, ndhal->ndhal_pci.dram_bar, "BAR4", &nd->npdev.bar4_pa, &nd->npdev.bar4, &nd->npdev.bar4_size);
+	if (ret) {
+		goto fail_bar4_resource;
+	}
+
+	ret = ndhal->ndhal_pci.neuron_pci_init(nd);
 	if (ret) {
 		goto fail_bar4_resource;
 	}
@@ -465,6 +512,10 @@ static int neuron_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (ret)
 		goto fail_memset_mc;
 
+	// initialize the firmware layout reader before the metrics thread that polls it.
+	// never fails - unsupported setups leave the reader disabled
+	fw_layout_init(nd);
+
 	if (nmetric_log_posts != 0) {
 		// initialize metric aggregation and posting
 		ret = nmetric_init(nd);
@@ -481,6 +532,7 @@ static int neuron_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 fail_nmetric_resource:
 	nmetric_stop_thread(nd);
+	fw_layout_destroy(nd);
 	mc_free(&nd->memset_mc);
 fail_memset_mc:
 	mc_free(&nd->ndma_q_dummy_mc);
@@ -514,11 +566,14 @@ static void neuron_pci_remove(struct pci_dev *dev)
 	if (nd == NULL)
 		return;
 
-	ndma_h2d_stop_cmpltn_thread(nd);
-
 	nr_stop_thread(nd);
 
+	neuron_ham_throttle_destroy(nd);
+
 	nmetric_stop_thread(nd);
+
+	// after the metrics thread is stopped nothing polls the firmware layout
+	fw_layout_destroy(nd);
 
     ndhal->ndhal_ext_cleanup();
 
@@ -573,3 +628,4 @@ void neuron_pci_module_exit(void)
 	pci_unregister_driver(&neuron_pci_driver);
 	neuron_dhal_free();
 }
+

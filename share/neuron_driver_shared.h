@@ -25,6 +25,15 @@ enum neuron_driver_feature_flag {
 	NEURON_DRIVER_FEATURE_ALLOC_WITH_PA   = 1ull << 10,
 	NEURON_DRIVER_FEATURE_ASYNC_RW        = 1ull << 11, // async H2D/D2H read/write
 	NEURON_DRIVER_FEATURE_ASYNC_COPY      = 1ull << 12, // async D2D copy
+	NEURON_DRIVER_FEATURE_H2D_DMA_NQ      = 1ull << 13, // notification queues on H2D DMA engines
+	NEURON_DRIVER_FEATURE_ASYNC_COMPL     = 1ull << 14, // async completion support
+	NEURON_DRIVER_FEATURE_H2D_DESC_EXECUTE = 1ull << 15, // NEURON_IOCTL_H2D_DESC_EXECUTE (user-built H2D descs)
+	NEURON_DRIVER_FEATURE_DMABUF_V2       = 1ull << 16, // dma-buf bug fixes
+	NEURON_DRIVER_FEATURE_ASYNC_MC2MC     = 1ull << 17, // async MC to MC support plus Read After Write (RAW) support
+	NEURON_DRIVER_FEATURE_H2D_DMA_NQ_NC_ID = 1ull << 18, // notification init ioctls carry the owning physical NC in engine_index for H2D NQs
+	NEURON_DRIVER_FEATURE_ASYNC_IO_SUPPORTED = NEURON_DRIVER_FEATURE_ASYNC_MC2MC, // async IO fully supported. Requires, async RW, async completion,
+	                                                                              // async desc execute, and async mc to mc (copy). MC2MC is last
+	                                                                              // feature before full async IO support. Just alias that flag.
 };
 
 enum neuron_switch_fabric_bar_type {
@@ -35,7 +44,7 @@ enum neuron_switch_fabric_bar_type {
 };
 
 // FIXME  this should be more generic - like node type.
-enum {
+enum neuron_pod_type {
 	NEURON_POD_TYPE_NONE = 0,
 	NEURON_POD_TYPE_P2P,
 	NEURON_POD_TYPE_SWITCH
@@ -125,6 +134,7 @@ enum neuron_dma_h2t_ctx_handle_type {
 enum NQ_DEVICE_TYPE {
     NQ_DEVICE_TYPE_NEURON_CORE = 0,
     NQ_DEVICE_TYPE_TOPSP,
+    NQ_DEVICE_TYPE_H2D_DMA, /**< nq_dev_id is the H2D DMA engine id */
     NQ_DEVICE_TYPE_MAX
 };
 
@@ -165,7 +175,7 @@ struct neuron_uuid {
 	__u8 value[32];
 };
 
-#define NEURON_MAX_PROCESS_PER_DEVICE 16 // 2 per core (arbitrary but needs to small number for fast lookup)
+#define NEURON_MAX_PROCESS_PER_DEVICE 32 // 2 per core (arbitrary but needs to small number for fast lookup)
 
 #define APP_INFO_PID_NC_LOCK_INFO	(1)
 #define APP_INFO_PID_MEM_USAGE		(1 << 1)
@@ -453,3 +463,4 @@ typedef struct nds_header {
 #define NDS_EXT_NEURONCORE_NC_DATA(base_addr, nc_index) ((uint64_t *)(base_addr + NDS_EXT_NEURONCORE_NC_DATA_START) + (nc_index * NDS_EXT_NEURONCORE_NC_DATA_COUNT))
 
 #endif  // NEURON_DRIVER_SHARED_H
+
