@@ -75,3 +75,4 @@ void neuron_log_rec_add(struct neuron_device *nd, enum neuron_log_type type, uin
 int neuron_log_dump(struct neuron_device *nd, pid_t pid, uint32_t log_dump_limit);
 
 #endif
+

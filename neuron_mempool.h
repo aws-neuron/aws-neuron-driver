@@ -65,7 +65,10 @@ struct neuron_mempool {
 	u64 scratchpad_size; // only used for allocations of type NEURON_MEMALLOC_TYPE_CONTIGUOUS_SCRATCHPAD_DEVICE
 };
 
-#define MAX_NUM_HBMS 4 // max supported number of HBMs per device, VX_NUM_HBMS macros define it per specific chip 
+#define MAX_NUM_HBMS 4 // max supported number of HBMs per device, VX_NUM_HBMS macros define it per specific chip
+
+// First 16MB of every HBM is used internally by the firmware, don't use it in the allocation pool
+#define MEMPOOL_CARVEOUT_SIZE 0x1000000 // 16MB
 
 // start page size for host MP
 #define MP_HOST_PAGE_SIZE_MIN (256UL * 1024)
@@ -230,3 +233,4 @@ static inline bool mc_access_is_within_bounds(const struct mem_chunk *mc, u64 ac
 }
 
 #endif
+

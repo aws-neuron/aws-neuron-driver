@@ -134,6 +134,12 @@
 /** Bus parity error on descriptor being prefetched */
 #define INT_2ND_GROUP_B_S2M_PREFETCH_AXI_PARITY BIT(8)
 
+/** Bus request to no descriptors hint - S2M engine has no RX descriptor available */
+#define INT_2ND_GROUP_B_S2M_NO_DESC_HINT BIT(7)
+
+/** Bus request to no descriptors timeout - S2M prefetcher timed out waiting for RX descriptor */
+#define INT_2ND_GROUP_B_S2M_NO_DESC_TO BIT(6)
+
 /** Bus request to I/O Fabric timeout error */
 #define INT_2ND_GROUP_B_S2M_DATA_AXI_TO BIT(2)
 /** Bus response from I/O Fabric error */
@@ -198,7 +204,7 @@
 	 INT_2ND_GROUP_B_S2M_PREFETCH_RING_ID | INT_2ND_GROUP_B_S2M_PREFETCH_AXI_TO |              \
 	 INT_2ND_GROUP_B_S2M_PREFETCH_AXI_RESP | INT_2ND_GROUP_B_S2M_PREFETCH_AXI_PARITY |         \
 	 INT_2ND_GROUP_B_S2M_DATA_AXI_TO | INT_2ND_GROUP_B_S2M_DATA_AXI_RESP |                     \
-	 INT_2ND_GROUP_B_S2M_DATA_AXI_PARITY)
+	 INT_2ND_GROUP_B_S2M_DATA_AXI_PARITY | INT_2ND_GROUP_B_S2M_NO_DESC_TO)
 
 #define UDMA_V4_IOFIC_2ND_GROUP_B_ERROR_INTS                                                       \
 	(UDMA_IOFIC_2ND_GROUP_B_ERROR_INTS | INT_2ND_GROUP_B_S2M_TRNSCTN_TBL_INFO_PARITY)
@@ -376,6 +382,8 @@ void udma_iofic_s2m_error_ints_unmask(struct udma *udma)
 {
 	u32 primary_grp_mask;
 	u32 sec_b;
+	u32 err_log_mask;
+	u32 data_cfg_2;
 
 	primary_grp_mask = INT_GROUP_D_S2M | INT_UDMA_V4_GROUP_D_2ND_IOFIC_GROUP_C;
 	sec_b = UDMA_V4_IOFIC_2ND_GROUP_B_ERROR_INTS;
@@ -401,6 +409,20 @@ void udma_iofic_s2m_error_ints_unmask(struct udma *udma)
 			      UDMA_V4_IOFIC_2ND_GROUP_C_S2M_ERROR_INTS);
 
 	udma_iofic_unmask_adv(udma, UDMA_IOFIC_LEVEL_PRIMARY, INT_GROUP_D, primary_grp_mask);
+
+	/* Mask rdr_no_desc_hint (bit 7) in S2M err_log_mask. The hint fires
+	 * immediately when no descriptor is available and would initiate a log
+	 * capture before the timeout (bit 6) fires. Masking the hint ensures the
+	 * log only loads when the timeout triggers.
+	 * Note: both bits still appear in the log data (the mask controls the load condition, not the data input to the flop). */
+	reg_read32(&udma->udma_regs_s2m->s2m.err_log_mask, &err_log_mask);
+	err_log_mask |= INT_2ND_GROUP_B_S2M_NO_DESC_HINT;
+	reg_write32(&udma->udma_regs_s2m->s2m.err_log_mask, err_log_mask);
+
+	/* Set no-desc timeout (desc_wait_timer) to maximum to avoid false aborts */
+	reg_read32(&udma->udma_regs_s2m->s2m_wr.data_cfg_2, &data_cfg_2);
+	data_cfg_2 = (data_cfg_2 & 0xFF000000) | 0x00FFFFFF;
+	reg_write32(&udma->udma_regs_s2m->s2m_wr.data_cfg_2, data_cfg_2);
 }
 
 void udma_iofic_error_ints_unmask_one(struct iofic_grp_ctrl *iofic_ctrl, uint32_t mask)
@@ -409,4 +431,5 @@ void udma_iofic_error_ints_unmask_one(struct iofic_grp_ctrl *iofic_ctrl, uint32_
 	iofic_abort_mask_clear(iofic_ctrl, 0, mask);
 	iofic_unmask(iofic_ctrl, 0, mask);
 }
+
 

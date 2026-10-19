@@ -43,3 +43,4 @@ void nci_reset_state(struct neuron_device *nd);
 void nci_reset_state_nc(struct neuron_device *nd, u32 nc_id);
 
 #endif
+

@@ -543,3 +543,4 @@ unsigned long nmmap_get_unmapped_area(struct file *filep, unsigned long addr,
 
 	return ALIGN(aligned, NEURON_P2P_HUGE_PAGE_SZ);
 }
+

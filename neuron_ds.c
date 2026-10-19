@@ -275,3 +275,4 @@ invalid_nc_index:
 		  nc_index + NDS_MAX_NEURONCORE_COUNT);
 	return 0;
 }
+

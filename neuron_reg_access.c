@@ -30,3 +30,4 @@ inline int reg_write32_masked(u32 __iomem *addr, u32 mask, u32 data)
 	reg_write32(addr, MASK_VAL(mask, data, temp));
 	return 0;
 }
+

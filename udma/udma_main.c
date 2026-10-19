@@ -710,3 +710,4 @@ int udma_desc_action_add(struct udma_q *udma_q, u32 num)
 	reg_write32(addr, num);
 	return 0;
 }
+

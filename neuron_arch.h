@@ -17,24 +17,6 @@ enum neuron_arch {
 	NEURON_ARCH_NUM
 };
 
-enum neuron_platform_type {
-	NEURON_PLATFORM_TYPE_STD = 0,
-	NEURON_PLATFORM_TYPE_ULTRASERVER = 1,
-	NEURON_PLATFORM_TYPE_PDS = 2,
-	NEURON_PLATFORM_TYPE_MAX = 3,
-	NEURON_PLATFORM_TYPE_INVALID,
-};
-
-struct neuron_platform_lookup {
-	const char *inst_name;
-	enum neuron_platform_type platform_type;
-};
-
-enum neuron_platform_operation_type {
-	NEURON_PLATFORM_OP_TYPE_DEVOPEN = 0,
-	NEURON_PLATFORM_OP_TYPE_EXEC = 1,
-};
-
 /**
  * narch_init() - Set neuron devices architecture and revision.
  *
@@ -89,13 +71,5 @@ bool narch_is_emu(void);
  */
 int narch_get_instance_type_name(char *instance_type_name, size_t instance_type_name_size);
 
-/**
- * narch_detect_platform_type() - Detect platform type from instance name.
- *
- * @table: Array of instance name to platform type mappings.
- *
- * Return: Matching platform type, or NEURON_PLATFORM_TYPE_STD if no match.
- */
-enum neuron_platform_type narch_detect_platform_type(const struct neuron_platform_lookup *table);
-
 #endif
+

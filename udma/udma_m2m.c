@@ -527,3 +527,4 @@ void udma_m2m_mask_ring_id_error(struct udma *udma, void __iomem *intc_base) {
 	reg_write32(&udma->udma_regs_s2m->s2m.err_log_mask, ring_id_mask);
 }
 
+

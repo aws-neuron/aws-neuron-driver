@@ -289,3 +289,4 @@ void ncrwl_release_current_process(struct neuron_device *nd)
 		mutex_unlock(&crwl->lock);
 	}
 }
+

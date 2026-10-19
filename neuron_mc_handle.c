@@ -266,3 +266,4 @@ void nmch_handle_cleanup(struct neuron_device *nd)
 	}
 	nmch_service_set_down(nd);
 }
+

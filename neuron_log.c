@@ -160,3 +160,4 @@ int neuron_log_dump(struct neuron_device *nd, pid_t pid, uint32_t log_dump_limit
 	}
 	return 0;
 }
+

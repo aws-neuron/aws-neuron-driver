@@ -84,3 +84,4 @@ int nmch_handle_init(struct neuron_device *nd);
 void nmch_handle_cleanup(struct neuron_device *nd);
 
 #endif
+

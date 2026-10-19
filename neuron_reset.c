@@ -18,6 +18,7 @@
 #include "neuron_ioctl.h"
 #include "neuron_device.h"
 #include "neuron_fw_io.h"
+#include "neuron_ham_throttle.h"
 #include "neuron_dhal.h"
 #include "neuron_nq.h"
 #include "neuron_test.h"
@@ -174,6 +175,7 @@ static int nr_reset_thread_fn(void *arg)
 			// This path is taken by internal driver reset logic, there is no need to move
 			// the request to the completion queue, since waiters will be polling device state instead
 			if (state == NEURON_RESET_STATE_COMPLETED) {
+				neuron_ham_throttle_init(nd);
 				nd->device_state = NEURON_DEVICE_STATE_READY;
 			} else {
 				nd->device_state = NEURON_DEVICE_STATE_INVALID;
@@ -270,6 +272,7 @@ int nr_start_ncs(struct neuron_device *nd, uint32_t nc_map, uint32_t request_id)
 		ndmar_init_ncs(nd, nc_map);
 		nr_call_post_reset_config(nd, nc_map, true);
 		if (request_id == NEURON_RESET_REQUEST_ALL) {
+			neuron_ham_throttle_init(nd);
 			nd->device_state = NEURON_DEVICE_STATE_READY;
 		}
 		return 0;
@@ -456,3 +459,4 @@ int nr_initiate_reset_via_fw(struct neuron_device *nd, uint32_t nc_map, uint32_t
 	nmetric_increment_reset_failure_count(nd, is_device_reset); // Record the reset failure in metrics
 	return -ETIMEDOUT;
 }
+

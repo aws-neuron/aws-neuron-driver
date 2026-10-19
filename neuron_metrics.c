@@ -1014,6 +1014,7 @@ static void nmetric_sample_high_freq(struct neuron_device *nd)
 {
 	npower_sample_utilization(nd);
 	nsysfsmetric_health_status_tick(nd);
+	fw_layout_poll(nd);
 }
 
 static void nmetric_aggregate_and_post_tick(struct neuron_device *nd, struct nmetric_versions *component_versions, u64 *curr_feature_bitmap, u64 *freed_feature_bitmap, u64 *const_u64_metrics, u64 *freed_const_u64_metrics, u8 tick)
@@ -1244,3 +1245,4 @@ void nmetric_set_performance_profile(struct neuron_device *nd, int profile)
 {
 	snprintf(nmetric_constant_metrics[NMETRIC_PROFILE_ID_IDX], NEURON_METRICS_VERSION_STRING_MAX_LEN + 1, "%d", ndhal->ndhal_perf.current_performance_profile);
 }
+

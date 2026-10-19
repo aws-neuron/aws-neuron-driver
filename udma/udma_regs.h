@@ -333,6 +333,14 @@ struct udma_s2m_rd {
 	u32 reserved0[12];
 };
 
+struct udma_s2m_wr {
+	/* [0x0] Stream data FIFO configuration */
+	u32 data_cfg_1;
+	/* [0x4] Data write configuration */
+	u32 data_cfg_2;
+	u32 reserved0[14];
+};
+
 struct udma_s2m_comp {
 	/* [0x0] Completion controller configuration */
 	u32 cfg_1c;
@@ -390,7 +398,7 @@ struct udma_s2m_regs_v4 {
 	struct udma_axi_s2m axi_s2m; /* [0x100] */
 	struct udma_s2m s2m; /* [0x200] */
 	struct udma_s2m_rd s2m_rd; /* [0x300] */
-	u32 reserved1[16];
+	struct udma_s2m_wr s2m_wr; /* [0x340] */
 	struct udma_s2m_comp s2m_comp; /* [0x380] */
 	u32 reserved2[784];
 	struct udma_s2m_q s2m_q[16]; /* [0x1000] */
@@ -666,3 +674,4 @@ union udma_q_regs {
 };
 
 #endif
+

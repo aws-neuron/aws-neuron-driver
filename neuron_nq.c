@@ -180,6 +180,45 @@ void nnq_destroy_nc(struct neuron_device *nd, u8 nc_id)
 	}
 }
 
+static void nnq_h2d_destroy(struct neuron_device *nd, pid_t owner)
+{
+	int h2d_nqid;
+	if (nd == NULL)
+		return;
+
+	mutex_lock(&nd->lock);
+	// assert nqs are quiesced before freeing memchunks
+	// quiesced by writing disable reg and reading back value
+	for (h2d_nqid = 0; h2d_nqid < NUM_H2D_DMA_PER_DEVICE; h2d_nqid++) {
+		if (nd->h2d_nq_mc[h2d_nqid] == NULL)
+			continue;
+		if (owner != 0 && nd->h2d_nq_mc[h2d_nqid]->pid != owner)
+			continue;
+
+		uint32_t h2d_engine_id = ndhal->ndhal_nq.nnq_get_h2d_id(h2d_nqid);
+		ndhal->ndhal_nq.nnq_set_nq_h2d_enable(nd, h2d_engine_id, NOTIFIC_NQ_ENABLE_RESET_VALUE);
+		ndhal->ndhal_nq.nnq_set_h2d_hwaddr(nd, h2d_engine_id, 0, 0);
+	}
+
+	for (h2d_nqid = 0; h2d_nqid < NUM_H2D_DMA_PER_DEVICE; h2d_nqid++) {
+		if (nd->h2d_nq_mc[h2d_nqid] == NULL)
+			continue;
+		if (owner != 0 && nd->h2d_nq_mc[h2d_nqid]->pid != owner)
+			continue;
+
+		uint32_t h2d_engine_id = ndhal->ndhal_nq.nnq_get_h2d_id(h2d_nqid);
+		u32 enable_val = 0xdeadbeef;
+		ndhal->ndhal_nq.nnq_get_nq_h2d_enable(nd, h2d_engine_id, &enable_val);
+		if (enable_val != NOTIFIC_NQ_ENABLE_RESET_VALUE) {
+			pr_warn("Failed to disable H2D Notification Queue %u (enable=0x%x). Cleaning Notification queue without disabling", h2d_engine_id, enable_val);
+		}
+		mc_free(&nd->h2d_nq_mc[h2d_nqid]);
+		nd->h2d_nq_mc[h2d_nqid] = NULL;
+	}
+	mutex_unlock(&nd->lock);
+
+}
+
 void nnq_destroy_all(struct neuron_device *nd)
 {
 	u8 nc_id;
@@ -190,4 +229,74 @@ void nnq_destroy_all(struct neuron_device *nd)
 		}
 		nnq_destroy_nc(nd, nc_id);
 	}
+	nnq_h2d_destroy(nd, 0);
 }
+
+int nnq_h2d_init(struct neuron_device *nd, uint32_t h2d_eng_id, u32 nc_id,
+		 u32 size, u32 on_host_memory, u32 hbm_index,
+		 bool force_alloc_mem, struct mem_chunk **nq_mc, u64 *mmap_offset)
+{
+	int h2d_nqid, ret;
+	struct mem_chunk *mc;
+	pid_t owner = task_tgid_nr(current);
+
+	if (size & (size - 1)) {
+		pr_err("notification ring size must be power of 2\n");
+		return -EINVAL;
+	}
+
+	if (!ndhal->ndhal_nq.nnq_set_h2d_hwaddr)
+		return -ENOSYS;
+
+	h2d_nqid = ndhal->ndhal_nq.nnq_get_nq_h2d_id(h2d_eng_id);
+	if (h2d_nqid < 0 || h2d_nqid >= NUM_H2D_DMA_PER_DEVICE)
+		return -EINVAL;
+
+	mutex_lock(&nd->lock);
+
+	if (nd->h2d_nq_mc[h2d_nqid] != NULL && nd->h2d_nq_mc[h2d_nqid]->pid != owner) {
+		mutex_unlock(&nd->lock);
+		return -EBUSY;
+	}
+
+	mc = nd->h2d_nq_mc[h2d_nqid];
+	if (mc == NULL || force_alloc_mem) {
+		struct mem_chunk *_mc = NULL;
+
+		ret = mc_alloc_align(nd, MC_LIFESPAN_CUR_PROCESS, size, on_host_memory ? 0 : size,
+					 on_host_memory ? MEM_LOC_HOST : MEM_LOC_DEVICE,
+					 hbm_index, nc_id,
+					 on_host_memory ? NEURON_MEMALLOC_TYPE_NOTIFICATION_HOST
+							: NEURON_MEMALLOC_TYPE_NOTIFICATION_DEVICE,
+					 &_mc);
+		if (ret) {
+			mutex_unlock(&nd->lock);
+			return ret;
+		}
+
+		ret = ndhal->ndhal_nq.nnq_set_h2d_hwaddr(nd, h2d_eng_id, size, _mc->pa);
+		if (ret) {
+			mc_free(&_mc);
+			mutex_unlock(&nd->lock);
+			return ret;
+		}
+
+		if (mc)
+			mc_free(&mc);
+		nd->h2d_nq_mc[h2d_nqid] = _mc;
+		mc = _mc;
+	}
+
+	*mmap_offset = (mc->mem_location == MEM_LOC_HOST) ? nmmap_offset(mc) : (u64)-1;
+	*nq_mc = mc;
+
+	mutex_unlock(&nd->lock);
+	return 0;
+}
+
+void nnq_h2d_handle_process_exit(struct neuron_device *nd)
+{
+	pid_t owner = task_tgid_nr(current);
+	nnq_h2d_destroy(nd, owner);
+}
+

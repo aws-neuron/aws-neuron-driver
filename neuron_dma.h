@@ -173,7 +173,7 @@ int ndma_memcpy_add_completion_desc( struct ndma_eng *eng, struct ndma_ring *rin
  * Wait for completion by start transfer of a DMA between two host memory locations and polling
  * on the host memory for the data to be written.
  */
-int ndma_memcpy_wait_for_completion(struct ndma_eng *eng, struct ndma_ring *ring, u32 count, void * ptr, bool async, bool is_d2d);
+int ndma_memcpy_wait_for_completion(struct ndma_eng *eng, struct ndma_ring *ring, u32 tx_count, u32 rx_count, void * ptr, bool async, bool is_d2d);
 
 /**
  * ndma_mc_pair_to_nc - Resolve the neuron core id for two memory chunks.
@@ -200,87 +200,6 @@ dma_addr_t ndma_mc_to_pa(struct mem_chunk *mc);
  * Architectures that require DMA retry disable the zero-copy pipeline.
  */
 bool ndma_zerocopy_supported(void);
-
-/**
- * ndma_zerocopy_submit() - Perform a pipelined zero-copy DMA transfer.
- * @nd: Neuron device whose DMA engine is used.
- * @nc_id: Neuron core identifier owning the queue.
- * @ops: Array of host buffer descriptors.
- * @num_ops: Number of descriptors in @ops.
- * @dev_base: Base device physical address for the transfer.
- * @qid: Queue identifier to submit descriptors on.
- * @direction: true for host-to-device, false for device-to-host.
- * @sequence_num: sequence number under async submission; 0 for sync.
- * @context: opaque context pointer returned in the completion queue for async submissions.
- *
- *   DMA data between a user space virtual address range and a contiguous location in device memory.
- *   In order to do this, we need to know the physical pages are associated with
- *   the user virtual address range and we need to make sure those physical pages stay
- *   associated with the user virtual address range while the DMA is happening.
- *   
- *   How do we do this?  By asking the kernel to pin the physical pages in memory until we are 
- *   done with them.  But our transaction could be large, the physical pages won't be contiguous,
- *   and pinning takes CPU cycles, so we break the dma transfer up into a series of smaller transfers
- *   where we pipeline the pinning of physical pages with dma transfers.
- *
- *   We use pin_user_pages_fast() to reduce pinning overhead because we know the process can't go 
- *   away while we are down here doing our thing in the kernel within a single IOCTL call. 
- *   
- *   ## For sync mode ##
- *   We enqueue DMA contexts into a fixed-size queue and drive submission from that queue.
- *   The loop:
- *      lock()
- *      while data remains
- *         submit any pinned-but-unsubmitted ctxs when descriptors are available
- *         create a new ctx when queue space and pin budget allow
- *         pin pages immediately for the ctx
- *         advance queue tail and update host/device pointers
- *         wait on submitted ctxs from the head as needed to relieve pressure
- *      submit remaining pinned ctxs
- *      drain submitted ctxs from the head
- *      unlock()
- *
- *   ## For async mode ##
- *   We keep submitting dma contexts until we hit a threshold of pinned pages. 
- *   Once we hit the threshold, we stop pinning pages and set the mm_struct for remote pinning later.
- *   TODO: liulily to add more detail once the complete async path is implemented.
- * 
- *  Notes:
- *    unpinning responsibilities. Up until a dma is successfully launched, this routine is responsible for unpinning
- *    host memory.  After that ndma_zerocopy_wait_for_completion() owns responsibility for unpinning pages.
- *
- *    We don't do this here, but pinning user pages across system (IOCTL) calls has a number of additional requirements.
- *    We would have to cleanup any pinned pages when the process goes away, so any pinned pages have to get tracked in 
- *    process context.
- *
- */
-int ndma_zerocopy_submit(struct neuron_device *nd,
-						u32 nc_id,
-						const nrt_tensor_batch_op_t *ops,
-						u32 num_ops,
-						dma_addr_t dev_base,
-						int qid,
-						bool direction,
-						u64 sequence_num,
-						void *context);
-
-/**
- * ndma_zerocopy_submit_completed() - Enqueue completed work for ordered async CQE.
- *
- * Used only for async BAR4 writes and temporary fake-async D2D copy, where the work
- * has already completed before we enqueue a dummy context.
- *
- * @nd: Neuron device.
- * @nc_id: NeuronCore id that owns the H2D queue.
- * @qid: H2D queue id.
- * @sequence_num: Async sequence number returned to userspace.
- * @compl_ret: Completion result to report in the CQE.
- * @context: Userspace completion context to copy into the CQE.
- *
- * Return: 0 if queued, negative errno otherwise.
- */
-int ndma_zerocopy_submit_completed(struct neuron_device *nd, u32 nc_id, int qid,
-				   u64 sequence_num, s64 compl_ret, void *context);
 
 /**
  * Pre-pinned host memory support
@@ -323,4 +242,100 @@ int ndma_unpin_host_memory(u64 va);
  */
 void ndma_pinned_mem_cleanup_process(pid_t pid);
 
+/**
+ * ndma_zca_zerocopy_submit() - Perform a pipelined zero-copy DMA transfer.
+ * 
+ * @nd: Neuron device whose DMA engine is used.
+ * @nc_id: Neuron core identifier owning the queue.
+ * @ops: Array of host buffer descriptors.
+ * @num_ops: Number of descriptors in @ops.
+ * @dev_base: Base device physical address for the transfer.
+ * @qid: Queue identifier to submit descriptors on.
+ * @direction: true for host-to-device, false for device-to-host.
+ * @sequence_num: sequence number under async submission; 0 for sync.
+ * @context: opaque context pointer returned in the completion queue for async submissions.
+ *
+ */
+int ndma_zca_zerocopy_submit(struct neuron_device *nd,
+						     u32 nc_id,
+						     const nrt_tensor_batch_op_t *ops,
+						     u32 num_ops,
+						     dma_addr_t dev_base,
+						     int qid,
+						     bool direction,
+						     bool bar4_wr,
+						     u64 sequence_num,
+						     void *context);
+
+/**
+ * ndma_zca_mc_copy_available() - Check whether a mem chunk to mem chunk copy can
+ * be driven through the pipelined dma path.
+ *
+ * @nd: Neuron device whose DMA engine would be used.
+ * @src_mc: source memory chunk of the transfer.
+ * @dst_mc: destination memory chunk of the transfer.
+ *
+ * Return: true if ndma_zca_mc_copy_submit() can be used for this pair, false if
+ *         the caller must fall back to the legacy ndma_memcpy_mc() path.
+ */
+bool ndma_zca_mc_copy_available(struct neuron_device *nd, struct mem_chunk *src_mc, struct mem_chunk *dst_mc);
+
+/**
+ * ndma_zca_mc_copy_submit() - Copy data from one memory chunk to another through
+ * the pipelined dma path.
+ *
+ * @nd: Neuron device whose DMA engine is used.
+ * @src_mc: source memory chunk from which data should be copied.
+ * @dst_mc: destination memory chunk to which data should be copied.
+ * @src_offset: offset in the source from where copy should start.
+ * @dst_offset: offset in the destination.
+ * @size: copy size.
+ * @qid: Queue identifier to submit descriptors on.
+ * @sequence_num: sequence number under async submission; 0 for sync.
+ * @context: opaque context pointer returned in the completion queue for async submissions.
+ *
+ * Return: 0 if the transfer succeeds (sync) or was queued (async), a negative
+ *         error code otherwise.
+ */
+int ndma_zca_mc_copy_submit(struct neuron_device *nd, struct mem_chunk *src_mc, struct mem_chunk *dst_mc,
+                            u64 src_offset, u64 dst_offset, u64 size, int qid, u64 sequence_num, void *context);
+
+/**
+ * ndma_zca_dma_ioq_init() - initialize zerocopy async pipelined dma
+ *
+ */
+int ndma_zca_dma_ioq_init(struct ndma_eng *eng, struct ndma_ring *ring, struct ndma_h2t_dma_ioq **dma_ioq);
+
+/**
+ * ndma_zca_dma_ioq_free() - free and cleanup zercopy async pipelined dma
+ *
+ */
+void ndma_zca_dma_ioq_free(struct ndma_h2t_dma_ioq **dma_ioq);
+
+/**
+ * ndma_zca_desc_execute_submit() - Queue and execute a caller-built pair of
+ * TX/RX DMA descriptors on an H2T queue.
+ *
+ * @nd: Neuron device.
+ * @nc_id: NeuronCore that owns the target queue.
+ * @qid: H2T queue id.
+ * @tx_descs_user: userspace pointer to tx (m2s) descriptors.
+ * @tx_descs_bytes: byte size of tx_descs_user (multiple of sizeof(union udma_desc)).
+ * @rx_descs_user: userspace pointer to rx (s2m) descriptors.
+ * @rx_descs_bytes: byte size of rx_descs_user.
+ * @sequence_num: 0 for sync flow (blocks and returns transfer status);
+ *                non-zero for async flow (returns immediately, completion
+ *                is posted to the shared CQ with sequence_num/context).
+ * @context: opaque userspace pointer echoed in the CQE (async only).
+ */
+int ndma_zca_desc_execute_submit(struct neuron_device *nd,
+								 u32 nc_id,
+								 int qid,
+								 void __user *tx_descs_user,
+								 u64 tx_descs_bytes,
+								 void __user *rx_descs_user,
+								 u64 rx_descs_bytes,
+								 u64 sequence_num,
+								 void *context);
 #endif
+

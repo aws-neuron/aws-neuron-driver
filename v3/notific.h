@@ -63,3 +63,4 @@ static inline u64 notific_get_relative_offset_topsp_v3(int ts_idx)
 
 int notific_decode_nq_head_reg_access_v3(u64 offset, u8 *nc_id, u32 *nq_type, u8 *instance,
 				      bool *is_top_sp);
+

@@ -26,7 +26,9 @@
 #include "neuron_sysfs_metrics.h"
 #include "neuron_log.h"
 #include "neuron_power.h"
+#include "neuron_ham_throttle.h"
 #include "neuron_fw_io.h"
+#include "neuron_fw_layout.h"
 
 #ifndef static_assert
 #define static_assert(expr, ...)
@@ -77,6 +79,19 @@ struct neuron_device_bar_info {
 	struct fw_io_bar_entry bars[NEURON_MAX_SWITCH_BARS];
 };
 
+/**
+ * struct neuron_ham_throttle - per-device periodic HAM throttle state.
+ *
+ * @periodic_mc: slot-9 notification-queue host buffer per NC (allocated once,
+ *               reused across resets).
+ * @agg_count: number of most-recent entries a sysfs read aggregates, per NC.
+ *             0 is treated as 1 (report only the latest entry).
+ */
+struct neuron_ham_throttle {
+	struct mem_chunk *periodic_mc[MAX_NC_PER_DEVICE];
+	u32 agg_count[MAX_NC_PER_DEVICE];
+};
+
 struct neuron_device {
 	struct pci_dev *pdev;
 	int device_index;
@@ -102,6 +117,9 @@ struct neuron_device {
 	struct mem_chunk **nq_mc[MAX_NC_PER_DEVICE];
 	// memory chunk allocated for notification queue in each TOP_SP.
 	struct mem_chunk **ts_nq_mc[MAX_TS_PER_DEVICE];
+	// memory chunks allocated for notification queues on each H2D DMA engine,
+	// indexed by the dhal-provided dense H2D index (see ndhal_ndmar.h2d_eng_index).
+	struct mem_chunk *h2d_nq_mc[NUM_H2D_DMA_PER_DEVICE];
 
 	// memory chunk for setting device mem
 	struct mem_chunk *memset_mc;
@@ -114,7 +132,11 @@ struct neuron_device {
 
 	struct neuron_metrics metrics; // aggregated metrics
 
+	struct neuron_fw_layout fw_layout; // reader for the firmware HBM layout
+
 	struct neuron_power power; // stats about device power utilization
+
+	struct neuron_ham_throttle ham_throttle; // periodic HAM throttle NQ state
 
 	struct neuron_crwl crwl[MAX_NC_PER_DEVICE]; // cooperative rw lock per NC.
 
@@ -145,3 +167,4 @@ struct neuron_device {
 };
 
 #endif
+

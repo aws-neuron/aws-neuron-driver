@@ -46,7 +46,16 @@
 
 static dev_t neuron_dev;
 static int major;
+
+static struct class neuron_dev_class_obj = {
+	.name         = "neuron_device",
+	.class_groups = neuron_class_groups,
+#if (!defined(RHEL_RELEASE_CODE) && (LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0))) || (defined(RHEL_RELEASE_CODE) && (RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 2)))
+	.owner        = THIS_MODULE,
+#endif
+};
 static struct class *neuron_dev_class;
+static bool neuron_dev_class_registered;
 
 /* one device node per device */
 #define NEURON_MAX_DEV_NODES MAX_NEURON_DEVICE_COUNT
@@ -861,6 +870,8 @@ static int ncdev_memset(struct neuron_device *nd, unsigned int cmd, void *param)
 static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *param)
 {
 	static_assert(NEURON_IOCTL_MEM_COPY != NEURON_IOCTL_MEM_COPY64);
+	static_assert(NEURON_IOCTL_MEM_COPY64_DEPRECATED != NEURON_IOCTL_MEM_COPY64);
+	static_assert(NEURON_IOCTL_MEM_COPY64 != NEURON_IOCTL_MEM_COPY64Q);
 
 	struct mem_chunk *src_mc;
 	struct mem_chunk *dst_mc;
@@ -871,6 +882,8 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 	u64 size;
 	u64 sequence_num = 0;
 	void *context = NULL;
+	u32 nc_id;
+	int qid = NEURON_DMA_H2T_DEFAULT_QID;
 	int ret;
 
 	if (cmd == NEURON_IOCTL_MEM_COPY) {
@@ -905,6 +918,19 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 		size = arg.size;
 		sequence_num = arg.sequence_num;
 		context = arg.context;
+	} else if (cmd == NEURON_IOCTL_MEM_COPY64Q) {
+		struct neuron_ioctl_mem_copy64q arg;
+		ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_mem_copy64q *)param, sizeof(arg));
+		if (ret)
+			return ret;
+		src_mem_handle = arg.src_mem_handle;
+		dst_mem_handle = arg.dst_mem_handle;
+		src_offset = arg.src_offset;
+		dst_offset = arg.dst_offset;
+		size = arg.size;
+		sequence_num = arg.sequence_num;
+		context = arg.context;
+		qid = arg.qid;
 	} else {
 		return -EINVAL;
 	}
@@ -924,20 +950,28 @@ static int ncdev_mem_copy(struct neuron_device *nd, unsigned int cmd, void *para
 		pr_err("dst offset+size is too large for mem handle\n");
 		return -E2BIG;
 	}
-	ret = ndma_memcpy_mc(nd, src_mc, dst_mc, src_offset, dst_offset, size);
-	if (ret) {
-		return ret;
+	// set/check qid
+	nc_id = ndma_mc_pair_to_nc(src_mc, dst_mc);
+	qid = (qid == NEURON_DMA_H2T_DEFAULT_QID) ? ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id) : qid;
+	if (!ndmar_qid_valid(qid)) {
+		pr_err("nd%02d: invalid h2t queue index %d", nd->device_index, qid);
+		return -ENOENT;
 	}
-	if (sequence_num != 0) {
-		u32 nc_id = ndma_mc_pair_to_nc(src_mc, dst_mc);
-		int qid = ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id);
-		int submit_ret;
 
-		// Temporary fake async copy: the copy is already done, but report its result through CQE in queue order.
-		submit_ret = ndma_zerocopy_submit_completed(nd, nc_id, qid, sequence_num, 0, context);
-		if (submit_ret) {
-			return submit_ret;
+	if (ndma_zca_mc_copy_available(nd, src_mc, dst_mc)) {
+		// the copy goes through the pipelined dma path, which handles both the sync
+		// (sequence_num == 0) and async cases natively.
+		ret = ndma_zca_mc_copy_submit(nd, src_mc, dst_mc, src_offset, dst_offset, size, qid, sequence_num, context);
+	} else {
+		if (sequence_num != 0) {
+			pr_err("nd%02d: sequence number cannot be used on platformw w/o async zero copy", nd->device_index);
+			return -EOPNOTSUPP;
 		}
+		if (qid != ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id)) {
+			pr_err("nd%02d: invalid h2t queue index %d", nd->device_index, qid);
+			return -ENOENT;
+		}
+		ret = ndma_memcpy_mc(nd, src_mc, dst_mc, src_offset, dst_offset, size);
 	}
 	trace_ioctl_mem_copy(nd, src_mc, dst_mc);
 	return ret;
@@ -1332,6 +1366,7 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 	// limit to internal threshold to prevent DoS attack
 	bar4_wr_threshold = (arg.bar4_wr_threshold < BAR4_WR_THRESHOLD_MAX) ? arg.bar4_wr_threshold : BAR4_WR_THRESHOLD_MAX;
 	use_bar4_wr = !narch_is_qemu() &&
+		      !narch_is_emu() &&
 		      (size <= bar4_wr_threshold) &&
 		      copy_to_mem_handle &&
 		      nd->npdev.bar4_pa &&
@@ -1359,9 +1394,11 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 
 		// for async mode, BAR4 write is already done; enqueue a completed ctx to preserve CQE order.
 		// for sync mode, return the BAR4 write result directly
-		if (sequence_num != 0) {
-			ret = ndma_zerocopy_submit_completed(nd, nc_id, qid, sequence_num, ret, context);
-		}
+		if ((sequence_num != 0) && !ret) {
+			bool bar4_wr = true;
+			ret = ndma_zca_zerocopy_submit(nd, nc_id, NULL, 1, 0ull, qid, true,
+						                   bar4_wr, sequence_num, context);
+		} // TODO we could create a failed request if sequence_num is non-zero
 		return ret;
 	} else {
 		nrt_tensor_batch_op_t op;
@@ -1375,10 +1412,10 @@ static int ncdev_mem_buf_zerocopy64(struct neuron_device *nd, unsigned int cmd, 
 		op.offset = offset;
 		op.buffer = buffer;
 		op.size = size;
-
-		ret = ndma_zerocopy_submit(nd, nc_id, &op, 1, dev_base, qid,
-					   copy_to_mem_handle ? true : false,
-					   sequence_num, context);
+	
+		bool bar4_wr = false;
+		ret = ndma_zca_zerocopy_submit(nd, nc_id, &op, 1, dev_base, qid, copy_to_mem_handle ? true : false,
+						               bar4_wr, sequence_num, context);
 		return ret;
 	}
 }
@@ -1425,6 +1462,7 @@ static int ncdev_mem_buf_zerocopy64_batch(struct neuron_device *nd, void *param)
 		goto cleanup;
 	}
 
+	// sanity check each batch entry and count up total ops
 	for (i = 0; i < arg.num_batches; i++) {
 		neuron_memcpy_batch_t batch = batches[i];
 		size_t num_ops = batch.num_ops;
@@ -1470,7 +1508,7 @@ static int ncdev_mem_buf_zerocopy64_batch(struct neuron_device *nd, void *param)
 			pr_err("failed to copy ops from user space\n");
 			goto cleanup;
 		}
-		batch->ops_ptr = ops;
+		batch->ops_ptr = ops;  // TODO note this is transmuting the batch ops pointer in the copy to change from pointing to user ops to driver ops
 		ops_buffer_offset += num_ops;
 
 		mc = ncdev_mem_handle_to_mem_chunk(nd, batch->mem_handle);
@@ -1481,7 +1519,7 @@ static int ncdev_mem_buf_zerocopy64_batch(struct neuron_device *nd, void *param)
 		}
 
 		bar4_wr_threshold = (batch->bar4_wr_threshold < BAR4_WR_THRESHOLD_MAX) ? batch->bar4_wr_threshold : BAR4_WR_THRESHOLD_MAX;
-		use_bar4_wr = !narch_is_qemu() && arg.is_copy_to_device && nd->npdev.bar4_pa && mc->mem_location == MEM_LOC_DEVICE;
+		use_bar4_wr = !narch_is_qemu() && !narch_is_emu() && arg.is_copy_to_device && nd->npdev.bar4_pa && mc->mem_location == MEM_LOC_DEVICE;
 
 		for (j = 0; j < batch->num_ops; j++) {
 			nrt_tensor_batch_op_t *op = &ops[j];
@@ -1539,6 +1577,8 @@ static int ncdev_mem_buf_zerocopy64_batch(struct neuron_device *nd, void *param)
 					}
 				}
 			}
+
+			//FIXME - there is a disconnect each batch has it's own context but we only have one sequence number. 
 		} else {
 			u32 nc_id    = ndma_mc_pair_to_nc(mc, mc);
 			int qid      = (arg.h2t_qid == NEURON_DMA_H2T_DEFAULT_QID) ? ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(nc_id) : arg.h2t_qid;
@@ -1557,7 +1597,9 @@ static int ncdev_mem_buf_zerocopy64_batch(struct neuron_device *nd, void *param)
 			}
 
 			// use the zero-copy batch function for ops within a single batch
-			ret = ndma_zerocopy_submit(nd, nc_id, batch->ops_ptr, batch->num_ops, dev_base, qid, arg.is_copy_to_device, arg.sequence_num, NULL);
+			bool bar4_wr = false;  // 
+			ret = ndma_zca_zerocopy_submit(nd, nc_id, batch->ops_ptr, batch->num_ops, dev_base, qid, arg.is_copy_to_device,
+						                   bar4_wr, arg.sequence_num, batch->context);
 			if (ret) {
 				pr_err("batch zero-copy DMA failed on batch %d on nd%02d: %d\n", i, nd->device_index, ret);
 				goto cleanup;
@@ -1571,6 +1613,41 @@ cleanup:
 	if (batches)
 		kfree(batches);
 	return ret;
+}
+
+static int ncdev_h2d_desc_execute(struct neuron_device *nd, void *param)
+{
+	struct neuron_ioctl_h2d_desc_execute arg;
+	int qid;
+	int ret;
+
+	ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_h2d_desc_execute *)param, sizeof(arg));
+	if (ret) {
+		return ret;
+	}
+
+	ret = ncdev_ncid_valid(arg.nc_id);
+	if (ret) {
+		return ret;
+	}
+
+	qid = (arg.h2t_qid == NEURON_DMA_H2T_DEFAULT_QID)
+	      ? ndhal->ndhal_ndmar.ndmar_get_h2t_def_qid(arg.nc_id)
+	      : arg.h2t_qid;
+	if (!ndmar_qid_valid(qid)) {
+		pr_err("nd%02d: invalid h2t queue index %d", nd->device_index, qid);
+		return -ENOENT;
+	}
+
+	if (!ndma_zerocopy_supported()) {
+		pr_err_once("nd%02d: zero copy is not supported for architectures requiring DMA retry", nd->device_index);
+		return -EINVAL;
+	}
+
+	return ndma_zca_desc_execute_submit(nd, arg.nc_id, qid,
+	                                    (void *)arg.tx_descs, arg.tx_descs_bytes,
+	                                    (void *)arg.rx_descs, arg.rx_descs_bytes,
+	                                    arg.sequence_num, arg.context);
 }
 
 static long ncdev_semaphore_ioctl(struct neuron_device *nd, unsigned int cmd, void *param)
@@ -1631,20 +1708,24 @@ static long ncdev_bar_read(struct neuron_device *nd, u8 bar, u64 *reg_addresses,
 	int i;
 	if (bar == 0 || bar == 2) {
 		u32 *data = NULL;
+		u64 bar_pa = (u64)nd->npdev.bar0_pa;
+		u64 bar_size = nd->npdev.bar0_size;
 
+		// Userspace addresses are BAR0-physical-relative (bar0_pa + offset).
+		// Validate against the physical BAR window, then translate each to the
+		// kernel VA (bar0 + offset) that the FWIO CSR reader actually dereferences.
+		//
+		// nd->npdev.bar0 is initialized to APB bar
+		// On V2 arch, APB bar is 0 usually, but 2 in case of QEMU
+		// From V2 arch onwards, nd->npdev.bar2 (axi_bar) is no longer initialized
+		// TODO: Remove bar2 fields
 		for (i = 0; i < data_count; i++) {
-			u64 bar_addr = (u64)nd->npdev.bar0;
-			u64 bar_size = nd->npdev.bar0_size;
-
-			// From V2 arch onwards, nd->npdev.bar2 (axi_bar) is no longer initialized
-			// TODO: Remove bar2 fields
-
-			// nd->npdev.bar0 is initialized to APB bar
-			// On V2 arch, APB bar is 0 usually, but 2 in case of QEMU
-
-			if ((reg_addresses[i] < bar_addr) || (reg_addresses[i] >= bar_addr + bar_size)) {
+			u64 off;
+			if ((reg_addresses[i] < bar_pa) || (reg_addresses[i] >= bar_pa + bar_size)) {
 				return -EINVAL;
 			}
+			off = reg_addresses[i] - bar_pa;
+			reg_addresses[i] = (u64)nd->npdev.bar0 + off;
 		}
 		data = kmalloc(data_size, GFP_KERNEL);
 		if (data == NULL)
@@ -1708,10 +1789,13 @@ static int ncdev_bar_write_data(struct neuron_device *nd, u8 bar, u64 *reg_addre
 	if (bar == 0) {
 		int i;
 		for (i = 0; i < data_count; i++) {
-			u64 bar_addr = (u64)nd->npdev.bar0;
+			// Userspace addresses are BAR0-physical-relative (bar0_pa + offset).
+			// Validate against the physical BAR window, recover the offset, then
+			// write to the kernel VA (bar0 + offset).
+			u64 bar_pa = (u64)nd->npdev.bar0_pa;
 			u64 bar_size = nd->npdev.bar0_size;
-			u64 off = reg_addresses[i] - bar_addr;
-			if ((reg_addresses[i] < bar_addr) || (reg_addresses[i] >= bar_addr + bar_size)) {
+			u64 off = reg_addresses[i] - bar_pa;
+			if ((reg_addresses[i] < bar_pa) || (reg_addresses[i] >= bar_pa + bar_size)) {
 				return -EINVAL;
 			}
 			if (ndhal->ndhal_ndma.ndma_is_bar0_write_blocked(off)) {
@@ -2019,9 +2103,9 @@ static long ncdev_device_info(struct neuron_device *nd, void *param)
 	}
 	result.connected_device_count = connected_device_count;
 
-	result.bar_address[0] = (u64)nd->npdev.bar0;
+	result.bar_address[0] = (u64)nd->npdev.bar0_pa;
 	result.bar_size[0] = nd->npdev.bar0_size;
-	result.bar_address[1] = (u64)nd->npdev.bar2;
+	result.bar_address[1] = (u64)nd->npdev.bar2_pa;
 	result.bar_size[1] = nd->npdev.bar2_size;
 
 	ret = copy_to_user(param, &result, sizeof(result));
@@ -2060,10 +2144,14 @@ static long ncdev_driver_info(unsigned int cmd, void *param)
 										 NEURON_DRIVER_FEATURE_MEM_ALLOC_TYPE | NEURON_DRIVER_FEATURE_HBM_SCRUB |
 										 NEURON_DRIVER_FEATURE_MEM_ALLOC64 | NEURON_DRIVER_FEATURE_CONTIGUOUS_SCRATCHPAD |
 										 NEURON_DRIVER_FEATURE_ZEROCOPY | NEURON_DRIVER_FEATURE_PINNED_HOST_MEM |
-										 NEURON_DRIVER_FEATURE_ALLOC_WITH_PA;
+										 NEURON_DRIVER_FEATURE_ALLOC_WITH_PA | NEURON_DRIVER_FEATURE_DMABUF_V2;
 			if (ndma_zerocopy_supported())
-				driver_info.feature_flags1 |= NEURON_DRIVER_FEATURE_ASYNC_RW |
-							      NEURON_DRIVER_FEATURE_ASYNC_COPY;
+				driver_info.feature_flags1 |= NEURON_DRIVER_FEATURE_ASYNC_RW | NEURON_DRIVER_FEATURE_ASYNC_COPY |
+											  NEURON_DRIVER_FEATURE_ASYNC_COMPL | NEURON_DRIVER_FEATURE_ASYNC_MC2MC |
+											  NEURON_DRIVER_FEATURE_H2D_DESC_EXECUTE |
+											  NEURON_DRIVER_FEATURE_ASYNC_IO_SUPPORTED;
+			if (ndhal->ndhal_nq.h2d_dma_nq_nc_id_supported)
+				driver_info.feature_flags1 |= NEURON_DRIVER_FEATURE_H2D_DMA_NQ_NC_ID;
 
 			return copy_to_user(param, &driver_info, sizeof(driver_info));
 		}
@@ -2161,7 +2249,33 @@ static long ncdev_nc_nq_init_deprecated(struct neuron_device *nd, void *param)
 	return copy_to_user(param, &arg, sizeof(arg));
 }
 
-static long ncdev_nc_nq_init_libnrt(struct neuron_device *nd, void *param)
+/*
+ * For NQ_DEVICE_TYPE_H2D_DMA the ioctl's engine_index carries the caller's owned physical
+ * NC and the driver selects that SEngine's top-level engine. Engine ids (32+, 128+) never
+ * pass the NC range check, so an old runtime that still sends an engine id is rejected.
+ * Either core sharing the engine may allocate its queue; nnq_h2d_init grants it to the
+ * first process and answers others with -EBUSY.
+ */
+static int ncdev_h2d_nq_init(struct neuron_device *nd, u32 nc_id, u32 size, u32 on_host_memory,
+			     u32 hbm_index, bool force_alloc_mem, struct mem_chunk **mc, u64 *mmap_offset)
+{
+	uint32_t h2d_eng_id;
+	int ret;
+
+	ret = ncdev_ncid_valid(nc_id);
+	if (ret)
+		return ret;
+	if (!(ndhal->ndhal_address_map.dev_nc_map & BIT(nc_id)))
+		return -EINVAL;
+	if (!ndhal->ndhal_nq.h2d_dma_nq_nc_id_supported)
+		return -EOPNOTSUPP;
+	h2d_eng_id = ndhal->ndhal_ndmar.ndmar_get_h2t_eng_id(nd, nc_id);
+
+	return nnq_h2d_init(nd, h2d_eng_id, nc_id, size, on_host_memory, hbm_index,
+			    force_alloc_mem, mc, mmap_offset);
+}
+
+static long ncdev_nc_nq_init_libnrt(struct neuron_device *nd, struct file *filep, void *param)
 {
 	struct neuron_ioctl_notifications_init_v2 arg;
 	int ret;
@@ -2179,6 +2293,10 @@ static long ncdev_nc_nq_init_libnrt(struct neuron_device *nd, void *param)
 		ret = ndhal->ndhal_topsp.ts_nq_init(nd, arg.nq_dev_id, arg.engine_index, arg.nq_type, arg.size,
 				 arg.on_host_memory, arg.hbm_index,
 				 false, &mc, &arg.mmap_offset);
+	} else if (arg.nq_dev_type == NQ_DEVICE_TYPE_H2D_DMA) {
+		ret = ncdev_h2d_nq_init(nd, arg.engine_index, arg.size,
+					arg.on_host_memory, arg.hbm_index,
+					false, &mc, &arg.mmap_offset);
 	} else {
 		return -ENOSYS;
 	}
@@ -2192,7 +2310,7 @@ static long ncdev_nc_nq_init_libnrt(struct neuron_device *nd, void *param)
 	return copy_to_user(param, &arg, sizeof(arg));
 }
 
-static long ncdev_nc_nq_init_with_realloc_libnrt(struct neuron_device *nd, void *param)
+static long ncdev_nc_nq_init_with_realloc_libnrt(struct neuron_device *nd, struct file *filep, void *param)
 {
 	struct neuron_ioctl_notifications_init_with_realloc_v2 arg;
 	int ret;
@@ -2210,6 +2328,10 @@ static long ncdev_nc_nq_init_with_realloc_libnrt(struct neuron_device *nd, void 
 		ret = ndhal->ndhal_topsp.ts_nq_init(nd, arg.nq_dev_id, arg.engine_index, arg.nq_type, arg.size,
 				 arg.on_host_memory, arg.hbm_index,
 				 arg.force_alloc_mem, &mc, &arg.mmap_offset);
+	} else if (arg.nq_dev_type == NQ_DEVICE_TYPE_H2D_DMA) {
+		ret = ncdev_h2d_nq_init(nd, arg.engine_index, arg.size,
+					arg.on_host_memory, arg.hbm_index,
+					arg.force_alloc_mem, &mc, &arg.mmap_offset);
 	} else {
 		return -ENOSYS;
 	}
@@ -2645,6 +2767,10 @@ static int ncdev_nc_pid_state_dump(unsigned int cmd, void *param)
 	return ret;
 }
 
+// Max DMA engines used per HBM scrub. All ndma_get_engines_with_host_connectivity
+// implementations report either 16 or 32 engines, so 32 bounds every case.
+#define MAX_SCRUB_DMA_ENGINES 32
+
 static long ncdev_hbm_scrub_start(struct neuron_device *nd, void *param) {
 	struct neuron_ioctl_hbm_scrub_start arg;
 	int ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_hbm_scrub_start *)param,
@@ -2662,9 +2788,9 @@ static long ncdev_hbm_scrub_start(struct neuron_device *nd, void *param) {
 	// crwl to allow for a bitmap of devices
 
 	uint32_t num_dma_engines = 0;
-	uint32_t dma_engines[NUM_DMA_ENG_PER_DEVICE];
+	uint32_t dma_engines[MAX_SCRUB_DMA_ENGINES];
 	ndhal->ndhal_ndma.ndma_get_engines_with_host_connectivity(arg.hbm_index, dma_engines, &num_dma_engines);
-	if (num_dma_engines != 16) {
+	if (num_dma_engines != 16 && num_dma_engines != 32) {
 		// Any power of 2 should be fine if we update array sizes, but we should test before enabling
 		pr_err("HBM scrub: Unsupported number (%d) of DMA engines\n", num_dma_engines);
 		return -1;
@@ -2675,7 +2801,7 @@ static long ncdev_hbm_scrub_start(struct neuron_device *nd, void *param) {
 	struct mem_chunk **completion_mc_ptr = &(nd->hbm_scrub_ctx.completion_marker_buf[arg.hbm_index]);
 	struct mem_chunk **hostbuf_mc = nd->hbm_scrub_ctx.hostbuf_mc;
 	*completion_mc_ptr = NULL;
-	void **completion_bufs[16];
+	void **completion_bufs[MAX_SCRUB_DMA_ENGINES];
 	uint32_t *buf = NULL;
 	int i = 0;
 	for (i = 0; i < num_dma_engines; i++) {
@@ -2704,8 +2830,8 @@ static long ncdev_hbm_scrub_start(struct neuron_device *nd, void *param) {
 	uint64_t curaddr = startaddr;
 	const uint64_t endaddr = ndhal->ndhal_mpset.device_dram_end_addr[arg.hbm_index];
 
-	uint32_t num_descs[16] = {0};
-	uint32_t estimated_descs = (endaddr - startaddr) / (transfer_size * 16) + 3; // some extra for host transfers and completion marker
+	uint32_t num_descs[MAX_SCRUB_DMA_ENGINES] = {0};
+	uint32_t estimated_descs = (endaddr - startaddr) / (transfer_size * num_dma_engines) + 3; // some extra for host transfers and completion marker
 	uint32_t allocated_descs = ndmar_ring_get_desc_count(estimated_descs);
 	uint64_t ring_size = allocated_descs * sizeof(union udma_desc);
 
@@ -2842,9 +2968,9 @@ static long ncdev_hbm_scrub_wait_for_cmpl(struct neuron_device *nd, void *param)
 	const uint64_t transfer_size = MAX_DMA_DESC_SIZE;
 
 	int num_dma_engines = 0;
-	int dma_engines[NUM_DMA_ENG_PER_DEVICE];
+	int dma_engines[MAX_SCRUB_DMA_ENGINES];
 	ndhal->ndhal_ndma.ndma_get_engines_with_host_connectivity(arg.hbm_index, dma_engines, &num_dma_engines);
-	if (num_dma_engines != 16) {
+	if (num_dma_engines != 16 && num_dma_engines != 32) {
 		// Any power of 2 should be fine if we update array sizes, but we should test before enabling
 		pr_err("HBM scrub: Unsupported number (%d) of DMA engines\n", num_dma_engines);
 		return -1;
@@ -2859,7 +2985,7 @@ static long ncdev_hbm_scrub_wait_for_cmpl(struct neuron_device *nd, void *param)
 		pr_err("Scrub failed for nd%d HBM %d: scrub context corrupted\n", nd->device_index, arg.hbm_index);
 		goto scrub_cleanup;
 	}
-	void **completion_bufs[16];
+	void **completion_bufs[MAX_SCRUB_DMA_ENGINES];
 	const uint64_t endaddr = ndhal->ndhal_mpset.device_dram_end_addr[arg.hbm_index];
 	const uint64_t hbm_size = endaddr - ndhal->ndhal_mpset.device_dram_effective_base_addr[arg.hbm_index];
 	uint64_t approx_num_desc = hbm_size / (num_dma_engines * transfer_size);
@@ -2872,7 +2998,7 @@ static long ncdev_hbm_scrub_wait_for_cmpl(struct neuron_device *nd, void *param)
 		struct ndma_eng   *eng   = &nd->ndma_engine[eng_id];
 		struct ndma_queue *queue = &eng->queues[qid];
 		struct ndma_ring  *ring  = &queue->ring_info;
-		ret = ndma_memcpy_wait_for_completion(eng, ring, approx_num_desc, completion_bufs[i], false, true);
+		ret = ndma_memcpy_wait_for_completion(eng, ring, approx_num_desc, approx_num_desc, completion_bufs[i], false, true);
 		if (ret) {
 			pr_err("Scrub failed for nd%d HBM %d\n", nd->device_index, arg.hbm_index);
 			goto scrub_cleanup;
@@ -3331,6 +3457,30 @@ static int ncdev_host_mem_unpin(void *param)
 	return ndma_unpin_host_memory(arg.va);
 }
 
+static int ncdev_pcie_profile(struct neuron_device *nd, void *param)
+{
+	struct neuron_ioctl_pcie_profile arg;
+	int ret;
+
+	ret = neuron_copy_from_user(__func__, &arg, (struct neuron_ioctl_pcie_profile *)param, sizeof(arg));
+	if (ret) {
+		return ret;
+	}
+
+	if (arg.ctrl == 0) {
+		ret = fw_io_set_pcie_profile(nd->fw_io_ctx, arg.profile);
+	} else if (arg.ctrl == 1) {
+		ret = fw_io_get_pcie_profile(nd->fw_io_ctx, &arg.profile);
+		if (ret == 0) {
+			ret = neuron_copy_to_user(__func__, (void*)param, &arg, sizeof(arg));
+		}
+	} else {
+		return -ENOTSUPP;
+	}
+
+	return ret;
+}
+
 inline static long ncdev_misc_ioctl(struct file *filep, unsigned int cmd, unsigned long param) {
 	if ((cmd == NEURON_IOCTL_CRWL_NC_RANGE_MARK) || (cmd == NEURON_IOCTL_CRWL_NC_RANGE_MARK_EXT0)) {
 		return ncdev_crwl_nc_range_mark(filep, cmd, (void *)param);
@@ -3524,6 +3674,8 @@ static long ncdev_ioctl(struct file *filep, unsigned int cmd, unsigned long para
 		return ncdev_mem_buf_zerocopy64(nd, cmd, (void *)param);
 	} else if (cmd == NEURON_IOCTL_MEM_BUF_ZEROCOPY64_BATCHES) {
 		return ncdev_mem_buf_zerocopy64_batch(nd, (void *)param);
+	} else if (cmd == NEURON_IOCTL_H2D_DESC_EXECUTE) {
+		return ncdev_h2d_desc_execute(nd, (void *)param);
 	} else if (cmd == NEURON_IOCTL_PROGRAM_ENGINE) {
 		return ncdev_program_engine(nd, (void *)param);
 	} else if (_IOC_NR(cmd) == _IOC_NR(NEURON_IOCTL_PROGRAM_ENGINE_NC)) {
@@ -3553,9 +3705,9 @@ static long ncdev_ioctl(struct file *filep, unsigned int cmd, unsigned long para
 	} else if (cmd == NEURON_IOCTL_NOTIFICATIONS_INIT_V1) {
 		return ncdev_nc_nq_init_deprecated(nd, (void *)param);
 	} else if (cmd == NEURON_IOCTL_NOTIFICATIONS_INIT_V2) {
-		return ncdev_nc_nq_init_libnrt(nd, (void *)param);
+		return ncdev_nc_nq_init_libnrt(nd, filep, (void *)param);
 	} else if (cmd == NEURON_IOCTL_NOTIFICATIONS_INIT_WITH_REALLOC_V2) {
-		return ncdev_nc_nq_init_with_realloc_libnrt(nd, (void *)param);
+		return ncdev_nc_nq_init_with_realloc_libnrt(nd, filep, (void *)param);
 	} else if (cmd == NEURON_IOCTL_NOTIFICATIONS_DESTROY_V1) {
 		return 0;
 	} else if (cmd == NEURON_IOCTL_NOTIFICATIONS_QUEUE_INFO) {
@@ -3604,6 +3756,8 @@ static long ncdev_ioctl(struct file *filep, unsigned int cmd, unsigned long para
 		return ncdev_get_async_h2d_dma_compl_queues(nd, (void*)param);
 	} else if (cmd == NEURON_IOCTL_GET_BAR_INFO) {
 		return ncdev_get_fw_bars(nd, (void*)param);
+	} else if (cmd == NEURON_IOCTL_PCIE_PROFILE) {
+		return ncdev_pcie_profile(nd, (void*)param);
 	}
 
 	// B/W compatibility
@@ -3712,6 +3866,7 @@ static int ncdev_flush(struct file *filep, fl_owner_t id)
 		// If this proc exited in the middle of a reset, wait for the reset to be processed.
 		nr_wait(nd, task_tgid_nr(current), true);
 		ndmar_handle_process_exit(nd, task_tgid_nr(current));
+		nnq_h2d_handle_process_exit(nd);
 		msleep(10); // TODO - confirm with HW dev, whether any delay needed after q reset.
 		ncrwl_release_current_process(nd);
 		neuron_ds_release_pid(&nd->datastore, task_tgid_nr(current));
@@ -3797,39 +3952,24 @@ static struct file_operations ncdev_fops = {
 	.get_unmapped_area = ncdev_get_unmapped_area,
 };
 
-static ssize_t device_reset_show(struct device *dev, struct device_attribute *attr, char *buf)
+void ncdev_trigger_sysfs_reset(struct neuron_device *nd)
 {
-	int minor = MINOR(dev->devt);
-	if (minor >= NEURON_MAX_DEV_NODES) {
-		return -ENODEV;
-	}
-	return scnprintf(buf, PAGE_SIZE, "%d\n", devnodes[minor].ndev->device_state);
-}
+	struct ncdev *devnode = (struct ncdev *)nd->ncdev;
 
-static ssize_t driver_reset_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
-{
-	struct ncdev *devnode;
-	int minor = MINOR(dev->devt);
-	if (minor >= NEURON_MAX_DEV_NODES) {
-		return -ENODEV;
-	}
-	devnode = &devnodes[minor];
+	if (!devnode)
+		return;
 
 	mutex_lock(&devnode->ncdev_lock);
 	if (devnode->open_count == 0) { // only trigger sysfs reset if the device is not opened by app
-		nr_start_ncs(devnode->ndev, NEURON_NC_MAP_DEVICE, NEURON_RESET_REQUEST_ALL);
+		nr_start_ncs(nd, NEURON_NC_MAP_DEVICE, NEURON_RESET_REQUEST_ALL);
 	}
 	mutex_unlock(&devnode->ncdev_lock);
-
-	return count;
 }
-
-static DEVICE_ATTR(reset, S_IWUSR | S_IRUSR, device_reset_show, driver_reset_store);
 
 static ssize_t neuron_core_count_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	// We would prefer to have a newline here for consistency with other output but
-	// that breaks backward compatibility with the device plugin. They are fixing the 
+	// that breaks backward compatibility with the device plugin. They are fixing the
 	// plugin to handle if a newline is present, so in the future we can add it when
 	// older plugins are not a concern - https://tiny.amazon.com/k1ezuoub
 	return scnprintf(buf, PAGE_SIZE, "%d", ndhal->ndhal_address_map.nc_per_device);
@@ -3837,93 +3977,9 @@ static ssize_t neuron_core_count_show(struct device *dev, struct device_attribut
 
 static DEVICE_ATTR(core_count, S_IRUGO, neuron_core_count_show, NULL);
 
-#define CONNECTED_DEVICES_MAX_LEN 20
-static ssize_t neuron_connected_devices_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	int ret = 0;
-	int i = 0;
-	int offset = 0;
-	struct ncdev *devnode;
-	struct neuron_device *nd;
-	u32 connected_devices[MAX_NEURON_DEVICE_COUNT];
-	int connected_device_count = 0;
-
-	int minor = MINOR(dev->devt); // neuron device id
-	if (minor >= NEURON_MAX_DEV_NODES) {
-		return -ENODEV;
-	}
-	devnode = &devnodes[minor];
-	nd = devnode->ndev;
-	ret = ndhal->ndhal_fw_io.fw_io_topology(nd->fw_io_ctx, nd->pdev->device, minor, connected_devices, &connected_device_count);
-	if (ret)
-		return ret;
-
-	for (i = 0; i < connected_device_count - 1; i++) {
-		offset += snprintf(buf + offset, CONNECTED_DEVICES_MAX_LEN - offset, "%d, ", connected_devices[i]);
-		if (offset >= CONNECTED_DEVICES_MAX_LEN) {
-			pr_err("snprintf failed when showing connected devices\n");
-			return 0;
-		}
-	}
-	if (connected_device_count == 0)
-		offset += snprintf(buf, CONNECTED_DEVICES_MAX_LEN, "\n");
-	else
-		offset += snprintf(buf + offset, CONNECTED_DEVICES_MAX_LEN - offset, "%d\n", connected_devices[connected_device_count - 1]);
-	if (offset >= CONNECTED_DEVICES_MAX_LEN) {
-		pr_err("snprintf failed when showing connected devices\n");
-		return 0;
-	}
-
-	return offset;
-}
-
-static DEVICE_ATTR(connected_devices, S_IRUGO, neuron_connected_devices_show, NULL);
-
-static ssize_t fw_api_version_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct neuron_device *nd;
-	int fw_api_version;
-	int minor = MINOR(dev->devt);
-	if (minor >= NEURON_MAX_DEV_NODES) {
-		return -ENODEV;
-	}
-	nd = devnodes[minor].ndev;
-
-	fw_io_api_version_read(nd->npdev.bar0, &fw_api_version);
-	if (fw_api_version == 0xdeadbeef) { // the value is not readable during reset, try later
-		return scnprintf(buf, PAGE_SIZE, "busy\n");
-	}
-	return scnprintf(buf, PAGE_SIZE, "%u\n", fw_api_version);
-}
-
-static DEVICE_ATTR(fw_api_version, S_IRUGO, fw_api_version_show, NULL);
-
-static ssize_t fw_build_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	int ret;
-	struct neuron_device *nd;
-	u32 fw_build;
-	int minor = MINOR(dev->devt);
-	if (minor >= NEURON_MAX_DEV_NODES) {
-		return -ENODEV;
-	}
-	nd = devnodes[minor].ndev;
-
-	ret = fw_io_fw_build_read(nd->npdev.bar0, &fw_build);
-	if (ret || fw_build == 0xdeadbeef) { // the value is not readable during reset, try later
-		return scnprintf(buf, PAGE_SIZE, "busy\n");
-	}
-	return scnprintf(buf, PAGE_SIZE, "%u\n", fw_build);
-}
-
-static DEVICE_ATTR(fw_build, S_IRUGO, fw_build_show, NULL);
-
+// Retained for backwards compatibility; all other neuron{N} nodes are managed by nsysfsmetric.
 static struct attribute *attrs[] = {
-	&dev_attr_reset.attr,
 	&dev_attr_core_count.attr,
-	&dev_attr_connected_devices.attr,
-	&dev_attr_fw_api_version.attr,
-	&dev_attr_fw_build.attr,
 	NULL,
 };
 
@@ -4267,7 +4323,7 @@ int ncdev_class_attr_init(void)
 		int class_attrs_cnt;
 
 		for (i = 0; i < sizeof(ncdev_platform_class_attrs) / sizeof(*ncdev_platform_class_attrs); i++) {
-			if (ncdev_platform_class_attrs[i].platform_type == ndhal->ndhal_arch.platform_type) {
+			if (ncdev_platform_class_attrs[i].platform_type == ndhal->ndhal_arch.platform->type) {
 					class_attrs = ncdev_platform_class_attrs[i].class_attrs;
 					class_attrs_cnt = ncdev_platform_class_attrs[i].class_attrs_cnt;
 			}
@@ -4301,7 +4357,7 @@ void ncdev_class_attr_cleanup(void)
 		int class_attrs_cnt;
 
 		for (i = 0; i < sizeof(ncdev_platform_class_attrs) / sizeof(*ncdev_platform_class_attrs); i++) {
-			if (ncdev_platform_class_attrs[i].platform_type == ndhal->ndhal_arch.platform_type) {
+			if (ncdev_platform_class_attrs[i].platform_type == ndhal->ndhal_arch.platform->type) {
 					class_attrs = ncdev_platform_class_attrs[i].class_attrs;
 					class_attrs_cnt = ncdev_platform_class_attrs[i].class_attrs_cnt;
 			}
@@ -4326,8 +4382,10 @@ static void ncdev_cleanup(void)
 			pr_err("Error! ncdev is not NULL");
 	}
 
-	if (neuron_dev_class) {
-		class_destroy(neuron_dev_class);
+	if (neuron_dev_class_registered) {
+		class_unregister(neuron_dev_class);
+		neuron_dev_class_registered = false;
+		neuron_dev_class = NULL;
 	}
 
 	unregister_chrdev_region(MKDEV(major, 0), NEURON_MAX_DEV_NODES);
@@ -4349,15 +4407,13 @@ int ncdev_module_init(void)
 
 	major = MAJOR(neuron_dev);
 
-#if (!defined(RHEL_RELEASE_CODE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))) || (defined(RHEL_RELEASE_CODE) && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 2)))
-	neuron_dev_class = class_create("neuron_device");
-#else
-	neuron_dev_class = class_create(THIS_MODULE, "neuron_device");
-#endif
-	if (IS_ERR(neuron_dev_class)) {
-		ret = PTR_ERR(neuron_dev_class);
+	ret = class_register(&neuron_dev_class_obj);
+	if (ret) {
+		pr_err("failed to register neuron_device class: %d\n", ret);
 		goto fail;
 	}
+	neuron_dev_class = &neuron_dev_class_obj;
+	neuron_dev_class_registered = true;
 
 	return ret;
 
@@ -4370,3 +4426,4 @@ void ncdev_module_exit(void)
 {
 	ncdev_cleanup();
 }
+

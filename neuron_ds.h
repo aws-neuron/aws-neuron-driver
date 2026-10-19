@@ -14,7 +14,7 @@
 #include <linux/mutex.h>
 
 // Size of datastore
-#define NEURON_DATASTORE_SIZE (256 * 1024UL)
+#define NEURON_DATASTORE_SIZE (128 * 1024UL)
 #define NEURON_MAX_DATASTORE_ENTRIES_PER_DEVICE (NEURON_MAX_PROCESS_PER_DEVICE)
 
 struct neuron_device;
@@ -117,3 +117,4 @@ void neuron_ds_release_lock(struct neuron_datastore *nds);
 uint64_t get_neuroncore_counter_value(struct neuron_datastore_entry *entry, int nc_index, int counter_index);
 
 #endif
+

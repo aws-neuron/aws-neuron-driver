@@ -43,3 +43,4 @@ void reg_write32(u32 __iomem *addr, u32 value);
 int reg_write32_masked(u32 __iomem *addr, u32 mask, u32 data);
 
 #endif
+

@@ -313,8 +313,6 @@ static void mp_destroy_gen_pool(struct neuron_mempool *mp)
 	}
 }
 
-// Upper 16MB is used internally by the firmware, don't use it in the allocation pool
-#define MEMPOOL_CARVEOUT_SIZE 0x1000000 // 16MB
 /**
  * mpset_block_carveout_regions()
  *
@@ -344,7 +342,9 @@ static int mpset_block_carveout_regions(struct neuron_device *nd, struct neuron_
 	for (hbm_index = 0; hbm_index < mpset->num_hbms; hbm_index++) {
 		const dma_addr_t start_addr = device_dram_addr[hbm_index];
 		struct mem_chunk *mc = NULL;
-		u32 nc_id = hbm_index; // TODO is this right?
+		// TODO: nc_id picks the H2D DMA engine/queue for this mc - fix before
+		// the fw layout reader (neuron_fw_layout.c) reads the carveout by DMA
+		u32 nc_id = hbm_index;
 		ret = mc_alloc_align(nd, MC_LIFESPAN_DEVICE, MEMPOOL_CARVEOUT_SIZE, 0, MEM_LOC_DEVICE, hbm_index, nc_id, NEURON_MEMALLOC_TYPE_NCDEV_DEVICE, &mc);
 		if (ret) {
 			pr_err("failed to allocate hbm carveout: ret=%d\n", ret);
@@ -928,3 +928,4 @@ int mc_dump_all_chunks(struct neuron_device *nd, u32 hbm_index, u32 num_entries_
 	*num_entries_out = cnt;
 	return 0;
 }
+

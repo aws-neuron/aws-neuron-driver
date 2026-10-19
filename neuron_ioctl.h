@@ -147,6 +147,17 @@ struct neuron_ioctl_mem_copy64 {
 	void *context; // [in] Opaque context pointer passed back in the completion queue.
 };
 
+struct neuron_ioctl_mem_copy64q {
+	__u64 src_mem_handle; // [in] Source memory handle from where data is copied.
+	__u64 dst_mem_handle; // [in] Destination memory handle to data is to be copied.
+	__u64 size; // [in] Size of the transfer.
+	__u64 src_offset; // [in] Offset in the source memory handle.
+	__u64 dst_offset; // [in] Offset in the destination memory handle.
+	__u64 sequence_num; // [in] The sequence number that uniquely identifies each async I/O.
+	void *context; // [in] Opaque context pointer passed back in the completion queue.
+	__u32 qid;  // [in] Qid of the target queue.
+};
+
 // Old drivers use the same mem copy ioctl number with this smaller payload.
 struct neuron_ioctl_mem_copy64_deprecated {
 	__u64 src_mem_handle; // [in] Source memory handle from where data is copied.
@@ -397,7 +408,7 @@ struct neuron_ioctl_notifications_init_v2 {
 	__u32 nq_dev_id; // [in] Notification device Index
 	__u32 nq_dev_type; // [in] Notification device type.
 	__u32 nq_type; // [in] Notification queue type
-	__u32 engine_index; // [in] Engine Index.
+	__u32 engine_index; // [in] Engine Index; for NQ_DEVICE_TYPE_H2D_DMA the caller's owned physical NC (the driver selects that SEngine's top-level engine)
 	__u32 size; // [in] Notification queue size in bytes
 	__u32 on_host_memory; // [in] If true allocates NQ in host memory; else allocates in device memory
 	__u32 hbm_index;   // [in] HBM index within a device
@@ -410,7 +421,7 @@ struct neuron_ioctl_notifications_init_with_realloc_v2 {
 	__u32 nq_dev_id; // [in] Notification device Index
 	__u32 nq_dev_type; // [in] Notification device type.
 	__u32 nq_type; // [in] Notification queue type
-	__u32 engine_index; // [in] Engine Index.
+	__u32 engine_index; // [in] Engine Index; for NQ_DEVICE_TYPE_H2D_DMA the caller's owned physical NC (the driver selects that SEngine's top-level engine)
 	__u32 size; // [in] Notification queue size in bytes
 	__u32 on_host_memory; // [in] If true allocates NQ in host memory; else allocates in device memory
 	__u32 hbm_index;   // [in] HBM index within a device
@@ -717,12 +728,40 @@ struct neuron_ioctl_host_mem_unpin {
 	__u64 va;			// [in] VA to unpin (must match exact VA from pin)
 };
 
+/**
+ * Queue and execute a caller-built pair of H2D DMA descriptors.
+ *
+ * Runtime supplies fully-built tx (m2s) and rx (s2m) descriptors; the driver
+ * copies them into the target H2T ring, appends its own completion descriptor
+ * pair, and drives the transfer through the shared queued-request pipeline.
+ *
+ * sequence_num == 0 selects the sync path: the ioctl blocks until completion
+ * and returns the transfer status. Non-zero selects the async path: the ioctl
+ * returns immediately and a completion queue entry with the caller's
+ * sequence_num and context is posted when the transfer completes.
+ */
+struct neuron_ioctl_h2d_desc_execute {
+	__u64 tx_descs;			// [in] tx descriptors to queue up
+	__u64 rx_descs;			// [in] rx descriptors to queue up
+	__u64 tx_descs_bytes;	// [in] size of the tx_descs buffer (multiple of sizeof(union udma_desc))
+	__u64 rx_descs_bytes;	// [in] size of the rx_descs buffer
+	__s32 h2t_qid;			// [in] h2t queue to use for the transfer. -1 = use default
+	__u32 nc_id;			// [in] NeuronCore id that owns the target queue
+	__u64 sequence_num;		// [in] 0 = sync, non-zero = async CQE sequence number
+	void *context;			// [in] opaque context pointer echoed in the CQE (async only)
+};
+
 #define NEURON_IOCTL_MAX_BAR_ENTRIES	16
 struct neuron_ioctl_get_bar_info {
 	__u32 query_type;                                  // [in] 1=INTER_SERVER, 2=INTRA_SERVER
 	__u32 count;                                       // [out] num valid entries
 	__u32 bar_types[NEURON_IOCTL_MAX_BAR_ENTRIES];     // [out] enum neuron_switch_fabric_bar_type
 	__u64 bars[NEURON_IOCTL_MAX_BAR_ENTRIES];          // [out] 64-bit PCIe BAR address
+};
+
+struct neuron_ioctl_pcie_profile {
+	__u8 ctrl;		// [in] control 0 = set; 1 = get
+	__u8 profile;   // [in/out] pcie profile
 };
 
 #define NEURON_IOCTL_BASE 'N'
@@ -758,6 +797,7 @@ struct neuron_ioctl_get_bar_info {
 #define NEURON_IOCTL_MEM_COPY _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy *)
 #define NEURON_IOCTL_MEM_COPY64_DEPRECATED _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy64_deprecated)
 #define NEURON_IOCTL_MEM_COPY64 _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy64)
+#define NEURON_IOCTL_MEM_COPY64Q _IOR(NEURON_IOCTL_BASE, 23, struct neuron_ioctl_mem_copy64q)
 
 /** Copy data from/to given host buffer to/from memory_handle. (using DMA)*/
 #define NEURON_IOCTL_MEM_BUF_COPY _IOWR(NEURON_IOCTL_BASE, 24, struct neuron_ioctl_mem_buf_copy *)
@@ -958,4 +998,10 @@ struct neuron_ioctl_get_bar_info {
 /** Get switch fabric BAR info for a device */
 #define NEURON_IOCTL_GET_BAR_INFO _IOWR(NEURON_IOCTL_BASE, 139, struct neuron_ioctl_get_bar_info)
 
+/** Queue and execute pre-built H2D DMA descriptors */
+#define NEURON_IOCTL_H2D_DESC_EXECUTE _IOWR(NEURON_IOCTL_BASE, 140, struct neuron_ioctl_h2d_desc_execute)
+
+#define NEURON_IOCTL_PCIE_PROFILE _IOWR(NEURON_IOCTL_BASE, 141, struct neuron_ioctl_pcie_profile)
+
 #endif
+

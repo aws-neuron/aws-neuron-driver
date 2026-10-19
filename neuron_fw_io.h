@@ -80,6 +80,7 @@ enum fw_io_get_data_type {
 	FW_IO_GET_DATA_PERF_PROFILE = 0x01,
 	FW_IO_GET_DATA_AVAILABLE_PROFILES = 0x02,
 	FW_IO_GET_DATA_BAR_INFO = 0x10,
+	FW_IO_GET_DATA_PCIE_PROFILE = 0x11,
 };
 
 struct fw_io_get_data_request {
@@ -143,7 +144,10 @@ enum {
 	FW_IO_CMD_POST_TO_CW = 2, // post given blob as metrics to CloudWatch
 	FW_IO_CMD_SET_POWER_PROFILE = 3, // set power profile
 	FW_IO_CMD_GET_DATA = 4, // get various FW data (see fw_io_get_data_request)
-	FW_IO_CMD_SET_FEATURE = 5 // set feature bitmap
+	FW_IO_CMD_SET_FEATURE = 5, // set feature bitmap
+	FW_IO_CMD_SET_PCIE_PROFILE = 7,
+	FW_IO_CMD_SET_MAX_VERSION = 8, // advertise the max misc-ram version the driver supports; selects the firmware HBM layout version
+	FW_IO_CMD_MAX = 9
 };
 
 enum {
@@ -292,8 +296,6 @@ struct fw_io_ctx {
 
 #define UINT64_LOW(x) ((u32)(((u64)(x)) & 0xffffffffULL))
 #define UINT64_HIGH(x) ((u32)((x) >> 32))
-
-#define FW_IO_CMD_MAX 6
 
 // Wait up to 30 seconds in worst case.
 // Hardware can in some cases take longer to come out of reset but for some reads
@@ -587,9 +589,30 @@ int fw_io_execute_request(struct fw_io_ctx *ctx, u8 command_id, const u8 *req, u
  * @param req_size: Request size
  * @param resp: Response buffer
  * @param resp_size: Response buffer size
+ * @param fw_error_code: set to the FW_IO_* error code from the last response received
+ *                       (FW_IO_SUCCESS if none was received)
  * @return 0 on success, negative on failure
  */
-int fw_io_execute_request_new(struct fw_io_ctx *ctx, u8 command_id, const u8 *req, u32 req_size, u8 *resp, u32 resp_size);
+int fw_io_execute_request_new(struct fw_io_ctx *ctx, u8 command_id, const u8 *req, u32 req_size,
+			      u8 *resp, u32 resp_size, u32 *fw_error_code);
+
+/**
+ * fw_io_set_max_version() - Advertise the highest misc-ram version the driver supports
+ * @param ctx: FWIO context
+ * @param max_misc_ram_version: highest misc-ram version whose metrics this driver parses
+ * @return 0 if firmware accepted the version, -ENOTSUPP if the running firmware does not
+ *         implement SET_MAX_VERSION (predates the HBM layout feature), other negative
+ *         value on failure
+ */
+int fw_io_set_max_version(struct fw_io_ctx *ctx, u32 max_misc_ram_version);
+
+/**
+ * fw_io_calc_crc32() - Compute a CRC32 with the polynomial shared with firmware
+ * @param data: data to checksum
+ * @param len: data length in bytes
+ * @return the CRC32 value
+ */
+u32 fw_io_calc_crc32(const u8 *data, u32 len);
 
 /**
  * fw_io_set_power_profile() - Set power profile
@@ -633,4 +656,21 @@ int fw_io_get_available_profiles(struct fw_io_ctx *ctx, u16 feature, u8 *num_pro
  */
 int fw_io_get_bar_info(struct fw_io_ctx *ctx, u8 query_type, struct fw_io_bar_entry *entries, u8 *count);
 
+/**
+ * fw_io_set_pcie_profile() - Set pcie profile
+ * @param ctx: FWIO context
+ * @param profile: pcie profile value to set
+ * @return 0 on success, negative on failure
+ */
+int fw_io_set_pcie_profile(struct fw_io_ctx *ctx, uint8_t profile);
+
+/**
+ * fw_io_get_pcie_profile() - Get current pcie profile
+ * @param ctx: FWIO context
+ * @param profile: Pointer to store the current profile value
+ * @return 0 on success, negative on failure
+ */
+int fw_io_get_pcie_profile(struct fw_io_ctx *ctx, uint8_t *profile);
+
 #endif
+

@@ -116,3 +116,4 @@ int npid_dec_allocated_memory(struct neuron_device *nd, enum mem_location locati
 int npid_get_allocated_memory(struct neuron_device *nd, pid_t pid, size_t *host_memory, size_t *device_memory);
 
 #endif
+

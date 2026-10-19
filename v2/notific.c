@@ -123,3 +123,4 @@ int notific_decode_nq_head_reg_access_v2(u64 offset, u8 *nc_id, u32 *nq_type, u8
 
 	return -EINVAL;
 }
+

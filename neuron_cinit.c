@@ -12,6 +12,7 @@
 
 #include "neuron_ioctl.h"
 #include "neuron_device.h"
+#include "neuron_ham_throttle.h"
 
 
 #define NCI_RETRY_COUNT 10
@@ -49,13 +50,17 @@ void nci_set_state(struct neuron_device *nd, u32 nc_id, u32 state, u32 *new_stat
 			nci_wait(nd, nc_id);
 		}
 	} else if (state == NEURON_CINIT_STATE_COMPLETED) {
+		bool complete = false;
 		mutex_lock(&nci->nci_lock);
 		current_state = nci->state;
-		if (nci->state == NEURON_CINIT_STATE_STARTED)
+		if (nci->state == NEURON_CINIT_STATE_STARTED) {
 			nci->state = NEURON_CINIT_STATE_COMPLETED;
-		else
+			complete = true;
+		} else
 			pr_err("nd%d nc:%d can't set init state to complete without starting\n", nd->device_index, nc_id);
 		mutex_unlock(&nci->nci_lock);
+		if (complete)
+			neuron_ham_throttle_reprogram_nc(nd, nc_id);
 	} else {
 		pr_err("nd%d nc:%d invalid set init state\n", nd->device_index, nc_id);
 	}
@@ -82,3 +87,4 @@ void nci_reset_state(struct neuron_device *nd)
 		nci_reset_state_nc(nd, i);
 	}
 }
+

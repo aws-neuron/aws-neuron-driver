@@ -149,3 +149,4 @@ int ndhal_register_funcs_vc(void)
     ndhal->ndhal_tpb.pe_get_fast_wl_cycle_cnt = ntpb_pe_get_fast_wl_cycle_cnt_vc;
     return 0;
 }
+
