@@ -22,10 +22,10 @@
 
 MODULE_DESCRIPTION("Neuron Driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("2.31.7.0");
+MODULE_VERSION("2.31.8.0");
 MODULE_ALIAS("pci:v00001d0fd00007064sv*sd*bc*sc*i*");
 
-const char driver_version[] = "2.31.7.0";
+const char driver_version[] = "2.31.8.0";
 const char driver_revision[] = "63b8760cad44a0c5c428065e92595d88203b7f51";
 
 #ifdef CONFIG_FAULT_INJECTION
