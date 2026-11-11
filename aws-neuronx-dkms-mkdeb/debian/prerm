@@ -1,7 +1,7 @@
 #!/bin/sh
 
 NAME=aws-neuronx
-VERSION=2.31.7.0
+VERSION=2.31.8.0
 
 set -e
 
